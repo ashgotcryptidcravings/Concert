@@ -9,6 +9,8 @@ workflows:
       app_store_connect: Codemagic Latest
 
     environment:
+      groups:
+        - ios_signing
       # Use Codemagic's current Xcode image for App Store Connect compatibility.
       xcode: latest
       # Signing profiles are fetched or created by the App Store Connect CLI step below.
