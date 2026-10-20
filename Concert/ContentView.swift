@@ -2,87 +2,897 @@
 //  ContentView.swift
 //  Concert
 //
-//  Created by Zero Unity on 10/20/26.
-//
 
 import SwiftUI
-import CoreData
+import UIKit
+import AVKit
 
-struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
+private enum ConcertTab: String, CaseIterable {
+    case discover = "Discover"
+    case favorites = "Favorites"
+    case search = "Search"
 
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
-
-    var body: some View {
-        NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
+    var symbol: String {
+        switch self {
+        case .discover: return "sparkle.magnifyingglass"
+        case .favorites: return "heart"
+        case .search: return "magnifyingglass"
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
+private enum AlbumSheet: Identifiable {
+    case all
+    case detail(AlbumCollection)
+
+    var id: String {
+        switch self {
+        case .all: return "all-albums"
+        case .detail(let album): return "album-\(album.id)"
+        }
+    }
+}
+
+private struct AirPlayRouteButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let picker = AVRoutePickerView()
+        picker.tintColor = .secondaryLabel
+        picker.activeTintColor = UIColor(Color.accentColor)
+        picker.prioritizesVideoDevices = false
+        return picker
+    }
+
+    func updateUIView(_ picker: AVRoutePickerView, context: Context) {}
+}
+
+private let loadingTrack = Track(
+    title: "",
+    artist: "",
+    album: "",
+    duration: "0:00",
+    artwork: "music.note",
+    tint: Color(uiColor: .tertiarySystemFill),
+    quality: ""
+)
+
+struct ContentView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var selectedTab: ConcertTab = .discover
+    @State private var libraryTracks: [Track]
+    @State private var currentTrack: Track
+    @State private var favorites: Set<String> = []
+    @State private var isLoadingLibrary = true
+    @State private var showingPlayer = false
+    @State private var playerDetent: PresentationDetent = .medium
+    @State private var showingSettings = false
+    @State private var albumSheet: AlbumSheet?
+    @State private var searchText = ""
+    @State private var audioQuality = "All qualities"
+    @State private var playerBackground = Color(uiColor: .systemGroupedBackground)
+    @StateObject private var playback = ConcertPlayback()
+
+    private var tracks: [Track] {
+        guard audioQuality != "All qualities" else { return libraryTracks }
+        return libraryTracks.filter { $0.quality == audioQuality.uppercased() }
+    }
+    private var albums: [AlbumCollection] {
+        makeAlbums(from: tracks)
+    }
+    private var allLibraryAlbums: [AlbumCollection] {
+        makeAlbums(from: libraryTracks)
+    }
+    private func makeAlbums(from source: [Track]) -> [AlbumCollection] {
+        Dictionary(grouping: source, by: \.albumID).compactMap { id, albumTracks in
+            let ordered = albumTracks.sorted {
+                if $0.discNumber != $1.discNumber { return $0.discNumber < $1.discNumber }
+                if $0.trackNumber != $1.trackNumber { return $0.trackNumber < $1.trackNumber }
+                let qualityRank: (String) -> Int = { quality in
+                    if quality.localizedCaseInsensitiveContains("spatial") { return 3 }
+                    if quality.localizedCaseInsensitiveContains("lossless") { return 2 }
+                    return 1
+                }
+                if qualityRank($0.quality) != qualityRank($1.quality) { return qualityRank($0.quality) > qualityRank($1.quality) }
+                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+            var seenTitles = Set<String>()
+            let uniqueTracks = ordered.filter {
+                seenTitles.insert("\($0.discNumber)|\($0.trackNumber)|\($0.title.lowercased())").inserted
+            }
+            guard let first = uniqueTracks.first else { return nil }
+            return AlbumCollection(id: id, title: first.album, artist: first.artist, tracks: uniqueTracks)
+        }
+        .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+    private var isPlaying: Bool { playback.isPlaying }
+
+    init() {
+        _libraryTracks = State(initialValue: [])
+        _currentTrack = State(initialValue: loadingTrack)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Group {
+                switch selectedTab {
+                case .discover: discoverView
+                case .favorites: favoritesView
+                case .search: searchView
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            nowPlayingBar
+            tabBar
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .task {
+            guard libraryTracks.isEmpty else { return }
+            let loadedTracks = await SongLibrary.load()
+            libraryTracks = loadedTracks
+            playback.updateLibrary(loadedTracks)
+            if let firstTrack = loadedTracks.first { currentTrack = firstTrack }
+            isLoadingLibrary = false
+        }
+        .sheet(isPresented: $showingPlayer) {
+            fullPlayer
+                .presentationDetents([.medium, .large], selection: $playerDetent)
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingSettings) {
+            settingsView
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .onReceive(playback.$currentTrackID.compactMap { $0 }) { trackID in
+            if let track = tracks.first(where: { $0.id == trackID }) { currentTrack = track }
+        }
+        .onChange(of: currentTrack.id) { _ in
+            withAnimation(.easeInOut(duration: 0.8)) {
+                playerBackground = artworkColor(for: currentTrack)
+            }
+        }
+        .onAppear {
+            playerBackground = artworkColor(for: currentTrack)
+        }
+        .alert("SharePlay", isPresented: Binding(
+            get: { playback.sharePlayError != nil },
+            set: { if !$0 { playback.sharePlayError = nil } }
+        )) {
+            Button("OK", role: .cancel) { playback.sharePlayError = nil }
+        } message: {
+            Text(playback.sharePlayError ?? "")
+        }
+    }
+
+    private var discoverView: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 28) {
+                header(title: "Discover", subtitle: "Good music, right on time.")
+
+                VStack(alignment: .leading, spacing: 14) {
+                    sectionTitle("Discover", action: "See all") {
+                        guard !isLoadingLibrary else { return }
+                        albumSheet = .all
+                    }
+                    if isLoadingLibrary {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 16) { ForEach(0..<3, id: \.self) { _ in skeletonAlbumCard } }
+                        }
+                    } else if albums.isEmpty {
+                        emptyLibraryMessage
+                    } else {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 16) {
+                                ForEach(albums) { album in
+                                    Button { albumSheet = .detail(album) } label: { albumCard(album) }
+                                        .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle("New and noteworthy", action: "See all")
+                    if isLoadingLibrary {
+                        ForEach(0..<2, id: \.self) { _ in skeletonTrackRow }
+                    } else {
+                        ForEach(tracks.suffix(2)) { track in trackRow(track) }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
+        }
+        .sheet(item: $albumSheet) { destination in
+            Group {
+                switch destination {
+                case .all:
+                    allAlbumsView
+                case .detail(let album):
+                    albumDetail(album)
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+    }
+
+    private var favoritesView: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                header(title: "Favorites", subtitle: "Your keepers, all in one place.")
+                HStack(spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18).fill(LinearGradient(colors: [.pink.opacity(0.8), .purple.opacity(0.9)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        Image(systemName: "heart.fill").font(.system(size: 34)).foregroundColor(.white)
+                    }
+                    .frame(width: 76, height: 76)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Loved Songs").font(.system(size: 18, weight: .bold, design: .rounded))
+                        Text("\(favorites.count) songs · Your personal collection").font(.caption).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        let favoriteTracks = tracks.filter { favorites.contains($0.title) }
+                        if let track = favoriteTracks.first ?? tracks.first { play(track, queue: favoriteTracks.isEmpty ? tracks : favoriteTracks) }
+                    } label: {
+                        Image(systemName: "play.fill").font(.system(size: 15, weight: .bold)).foregroundColor(.white).frame(width: 44, height: 44).background(Color.accentColor, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Divider()
+                    VStack(spacing: 4) {
+                    if isLoadingLibrary {
+                        ForEach(0..<4, id: \.self) { _ in skeletonTrackRow }
+                    } else {
+                        ForEach(tracks.filter { favorites.contains($0.title) }) { track in
+                            trackRow(track, showFavorite: true)
+                        }
+                    }
+                    if favorites.isEmpty && !isLoadingLibrary {
+                        VStack(spacing: 10) {
+                            Image(systemName: "heart").font(.system(size: 28)).foregroundColor(.secondary)
+                            Text("No favorites yet").font(.headline)
+                            Text("Tap the heart beside a song to keep it here.").font(.subheadline).foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 36)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var searchView: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 22) {
+                header(title: "Search", subtitle: "Find your next favorite.")
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                    TextField("Songs, artists, albums", text: $searchText)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundColor(.secondary) }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear search")
+                    }
+                }
+                .padding(13)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+
+                if isLoadingLibrary {
+                    ForEach(0..<5, id: \.self) { _ in skeletonTrackRow }
+                } else if searchText.isEmpty {
+                    Text("TRENDING IN CONCERT")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .tracking(1.2)
+                        .foregroundColor(.secondary)
+                    ForEach(tracks) { track in trackRow(track) }
+                } else {
+                    let searchableTracks = libraryTracks
+                    let results = searchableTracks.filter {
+                        $0.title.localizedCaseInsensitiveContains(searchText) ||
+                        $0.artist.localizedCaseInsensitiveContains(searchText) ||
+                        $0.album.localizedCaseInsensitiveContains(searchText)
+                    }
+                    if results.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "music.note.list").font(.system(size: 28)).foregroundColor(.secondary)
+                            Text("No matches").font(.headline)
+                            Text("Try another song, artist, or album.").font(.subheadline).foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    } else {
+                        Text("\(results.count) \(results.count == 1 ? "RESULT" : "RESULTS")")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .tracking(1.2)
+                            .foregroundColor(.secondary)
+                        ForEach(results) { track in trackRow(track) }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var settingsView: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Settings").font(.system(size: 30, weight: .bold, design: .rounded))
+                        Text("Tune Concert to your listening.").font(.subheadline).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button { showingSettings = false } label: {
+                        Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundColor(.secondary)
+                            .frame(width: 34, height: 34).background(Color(uiColor: .tertiarySystemGroupedBackground), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close settings")
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("PLAYBACK").font(.system(size: 11, weight: .bold, design: .rounded)).tracking(1.2).foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Audio quality", systemImage: "waveform")
+                            .font(.system(size: 15, weight: .medium))
+                        Picker("Audio quality", selection: $audioQuality) {
+                            Text("All").tag("All qualities")
+                            Text("Standard").tag("Standard")
+                            Text("Lossless").tag("Standard Lossless")
+                            Text("Spatial").tag("Full Spatial Lossless")
+                        }
+                        .pickerStyle(.segmented)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Crossfade").font(.system(size: 15, weight: .medium))
+                                Spacer()
+                                Text(playback.crossfadeDuration == 0 ? "Off" : "\(Int(playback.crossfadeDuration)) sec")
+                                    .font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                            }
+                            Slider(value: $playback.crossfadeDuration, in: 0...12, step: 1)
+                            Text("Blend the end of a song into the next.").font(.caption).foregroundColor(.secondary)
+                        }
+                        Toggle(isOn: $playback.autoplayEnabled) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Autoplay").font(.system(size: 15, weight: .medium))
+                                Text(playback.autoplayEnabled ? "The next library song starts automatically." : "Playback stops at the end of a song.").font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .tint(.accentColor)
+                    .padding(16)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var nowPlayingBar: some View {
+        HStack(spacing: 12) {
+            if isLoadingLibrary {
+                Circle().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 8) {
+                    Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 124, height: 11)
+                    Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 82, height: 9)
+                }
+                Spacer()
+                Circle().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 28, height: 28)
+                Circle().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 28, height: 28)
+            } else {
+                Button { showingPlayer = true } label: {
+                    HStack(spacing: 12) {
+                        artwork(currentTrack, size: 44)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(currentTrack.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary).lineLimit(1)
+                            Text(currentTrack.artist).font(.system(size: 12)).foregroundColor(.secondary).lineLimit(1)
+                        }
+                    }
+                    .foregroundColor(.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open now playing")
+                Spacer(minLength: 4)
+                Button { playback.startSharePlay() } label: {
+                    Image(systemName: "shareplay").font(.system(size: 18)).foregroundColor(playback.sharePlayActive ? .accentColor : .secondary).frame(width: 40, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Start SharePlay")
+                AirPlayRouteButton().frame(width: 44, height: 44).padding(.trailing, 2)
+                Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill").font(.system(size: 19, weight: .semibold)).foregroundColor(.primary).frame(width: 36, height: 40)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                Button { playback.next() } label: {
+                    Image(systemName: "forward.end.fill").font(.system(size: 17)).foregroundColor(.primary).frame(width: 30, height: 40)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Next track")
+                }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(alignment: .bottomLeading) {
+            GeometryReader { proxy in
+                let progress = !isLoadingLibrary && playback.duration > 0 ? playback.currentTime / playback.duration : 0
+                Capsule().fill(Color.accentColor).frame(width: proxy.size.width * progress, height: 2)
+            }
+            .frame(height: 2)
+            .padding(.horizontal, 2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 7)
+        .padding(.bottom, 4)
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 0) {
+            ForEach(ConcertTab.allCases, id: \.self) { tab in
+                Button { selectedTab = tab } label: {
+                    VStack(spacing: 5) {
+                        Image(systemName: tab.symbol).font(.system(size: 20, weight: selectedTab == tab ? .semibold : .regular))
+                        Text(tab.rawValue).font(.system(size: 10, weight: selectedTab == tab ? .semibold : .medium))
+                    }
+                    .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 3)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+    }
+
+    private var fullPlayer: some View {
+        GeometryReader { geometry in
+            let compactLayout = geometry.size.height < 500
+            let artworkSize = min(geometry.size.width * 0.62, max(compactLayout ? 96 : 150, geometry.size.height * (compactLayout ? 0.31 : 0.30)))
+            ZStack {
+                ScrollView(showsIndicators: false) {
+                VStack(spacing: compactLayout ? 10 : 18) {
+                    artwork(currentTrack, size: artworkSize)
+                        .shadow(color: playerBackground.opacity(0.45), radius: 24, y: 14)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(currentTrack.title).font(.system(size: 23, weight: .bold, design: .rounded)).lineLimit(1)
+                            Text(currentTrack.artist).font(.system(size: 16)).foregroundColor(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Button { toggleFavorite(currentTrack) } label: {
+                            Image(systemName: favorites.contains(currentTrack.title) ? "heart.fill" : "heart")
+                                .font(.system(size: 23)).foregroundColor(favorites.contains(currentTrack.title) ? .pink : .secondary)
+                        }.buttonStyle(.plain)
+                    }
+                    VStack(spacing: 4) {
+                        GeometryReader { proxy in
+                            let progress = min(1, max(0, playback.currentTime / max(playback.duration, 1)))
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
+                                Capsule().fill(Color.primary).frame(width: max(4, proxy.size.width * progress), height: 4)
+                                Circle().fill(Color(uiColor: .systemBackground)).frame(width: 22, height: 22)
+                                    .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                                    .offset(x: max(0, min(proxy.size.width - 22, proxy.size.width * progress - 11)))
+                            }
+                            .frame(maxHeight: .infinity)
+                            .contentShape(Rectangle())
+                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                                playback.seek(to: max(0, min(1, value.location.x / max(proxy.size.width, 1))) * max(playback.duration, 0))
+                            })
+                        }
+                        .frame(height: 30)
+                        .accessibilityElement()
+                        .accessibilityLabel("Playback position")
+                        .accessibilityValue(timeString(playback.currentTime))
+                        HStack {
+                            Text(timeString(playback.currentTime))
+                            Spacer()
+                            Text(timeString(playback.duration > 0 ? playback.duration : duration(for: currentTrack)))
+                        }
+                        .font(.caption2).foregroundColor(.secondary)
+                    }
+                    HStack(spacing: compactLayout ? 22 : 38) {
+                        Button { playback.toggleShuffle() } label: {
+                            Image(systemName: "shuffle").font(.system(size: 19))
+                                .foregroundColor(playback.shuffleEnabled ? .accentColor : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(playback.shuffleEnabled ? "Turn shuffle off" : "Turn shuffle on")
+                        Button { playback.previous() } label: { Image(systemName: "backward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
+                        Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
+                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: compactLayout ? 52 : 62))
+                        }.buttonStyle(.plain)
+                        Button { playback.next() } label: { Image(systemName: "forward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
+                        Button { playback.cycleRepeatMode() } label: {
+                            Image(systemName: playback.repeatMode == .one ? "repeat.1" : "repeat").font(.system(size: 19))
+                                .foregroundColor(playback.repeatMode == .off ? .secondary : .accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(repeatAccessibilityLabel)
+                    }
+                    .padding(.top, 3)
+                    if !compactLayout {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("UP NEXT")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .tracking(1.2)
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            let upcoming = Array(playback.upcomingTracks.prefix(5))
+                            if upcoming.isEmpty {
+                                Text("End of queue")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 12)
+                            } else {
+                                ForEach(upcoming) { track in
+                                    trackRow(track, queue: playback.currentQueue)
+                                }
+                            }
+                        }
+                        .padding(.top, 12)
+                    }
+                    Spacer(minLength: 12)
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 24)
+                .padding(.bottom, 44)
+                .frame(maxWidth: .infinity)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Color.clear.frame(height: 18)
+            }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                playerAtmosphere
+                    .ignoresSafeArea()
+            }
+        }
+    }
+
+    private var playerAtmosphere: some View {
+        GeometryReader { backgroundGeometry in
+            let audioPulse = CGFloat(playback.audioLevel)
+            let darkMode = colorScheme == .dark
+            ZStack {
+                Color(uiColor: .systemGroupedBackground)
+                LinearGradient(
+                    colors: [
+                        playerBackground.opacity(darkMode ? 0.28 : 0.48),
+                        playerBackground.opacity(darkMode ? 0.12 : 0.20),
+                        Color(uiColor: .systemGroupedBackground)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                Circle()
+                    .fill(playerBackground.opacity(isPlaying ? (darkMode ? 0.24 : 0.18) + playback.audioLevel * 0.34 : 0.08))
+                    .frame(width: backgroundGeometry.size.width * 1.25)
+                    .blur(radius: 76)
+                    .scaleEffect(isPlaying ? 0.94 + audioPulse * 0.46 : 0.88)
+                    .offset(
+                        x: (isPlaying ? backgroundGeometry.size.width * 0.20 : -backgroundGeometry.size.width * 0.22) + backgroundGeometry.size.width * audioPulse * 0.18,
+                        y: (isPlaying ? -backgroundGeometry.size.height * 0.24 : -backgroundGeometry.size.height * 0.12) - backgroundGeometry.size.height * audioPulse * 0.07
+                    )
+                Circle()
+                    .fill(playerBackground.opacity(isPlaying ? (darkMode ? 0.16 : 0.10) + playback.audioLevel * 0.30 : 0.06))
+                    .frame(width: backgroundGeometry.size.width * 0.94)
+                    .blur(radius: 68)
+                    .scaleEffect(isPlaying ? 1.05 - audioPulse * 0.32 : 1.08)
+                    .offset(
+                        x: (isPlaying ? -backgroundGeometry.size.width * 0.20 : backgroundGeometry.size.width * 0.20) - backgroundGeometry.size.width * audioPulse * 0.16,
+                        y: (isPlaying ? backgroundGeometry.size.height * 0.32 : backgroundGeometry.size.height * 0.42) + backgroundGeometry.size.height * audioPulse * 0.08
+                    )
+                Circle()
+                    .fill(Color.accentColor.opacity(isPlaying ? 0.08 + playback.audioLevel * 0.24 : 0.035))
+                    .frame(width: backgroundGeometry.size.width * 0.68)
+                    .blur(radius: 54)
+                    .scaleEffect(isPlaying ? 0.72 + audioPulse * 0.70 : 0.8)
+                    .offset(
+                        x: (isPlaying ? -backgroundGeometry.size.width * 0.12 : backgroundGeometry.size.width * 0.16) + backgroundGeometry.size.width * audioPulse * 0.22,
+                        y: (isPlaying ? -backgroundGeometry.size.height * 0.02 : backgroundGeometry.size.height * 0.08) - backgroundGeometry.size.height * audioPulse * 0.18
+                    )
+            }
+            .allowsHitTesting(false)
+            .animation(
+                isPlaying
+                    ? Animation.easeInOut(duration: 9).repeatForever(autoreverses: true)
+                    : Animation.easeOut(duration: 0.7),
+                value: isPlaying
+            )
+            .animation(.easeOut(duration: 0.24), value: playback.audioLevel)
+            .animation(.easeInOut(duration: 0.8), value: playerBackground)
+            .animation(.easeInOut(duration: 0.5), value: colorScheme)
+        }
+    }
+
+    private func header(title: String, subtitle: String) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 34, weight: .bold, design: .rounded)).tracking(-0.6)
+                Text(subtitle).font(.subheadline).foregroundColor(.secondary)
+            }
+            Spacer()
+            Button { showingSettings = true } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 23, weight: .regular))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open settings")
+        }
+    }
+
+    private var repeatAccessibilityLabel: String {
+        switch playback.repeatMode {
+        case .off: return "Repeat off. Tap to repeat all."
+        case .all: return "Repeating all songs. Tap to repeat one."
+        case .one: return "Repeating current song. Tap to turn repeat off."
+        }
+    }
+
+    private func sectionTitle(_ title: String, action: String, perform: @escaping () -> Void = {}) -> some View {
+        HStack {
+            Text(title).font(.system(size: 20, weight: .bold, design: .rounded))
+            Spacer()
+            Button(action, action: perform).font(.system(size: 13, weight: .semibold)).foregroundColor(.accentColor)
+        }
+    }
+
+    private func albumCard(_ album: AlbumCollection) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            artwork(album.artworkTrack, size: 148)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Text(album.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary).lineLimit(1)
+            Text("\(album.artist) · \(album.tracks.count) songs")
+                .font(.system(size: 12)).foregroundColor(.secondary).lineLimit(1)
+        }
+        .frame(width: 148, alignment: .leading)
+    }
+
+    private var skeletonAlbumCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(uiColor: .tertiarySystemFill))
+                .frame(width: 148, height: 148)
+            Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 124, height: 12)
+            Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 92, height: 10)
+        }
+        .frame(width: 148, alignment: .leading)
+        .accessibilityHidden(true)
+    }
+
+    private var skeletonTrackRow: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(uiColor: .tertiarySystemFill))
+                .frame(width: 52, height: 52)
+            VStack(alignment: .leading, spacing: 8) {
+                Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 158, height: 12)
+                Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 104, height: 10)
+                Capsule().fill(Color(uiColor: .tertiarySystemFill)).frame(width: 68, height: 8)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 5)
+        .accessibilityHidden(true)
+    }
+
+    private var emptyLibraryMessage: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("No music found").font(.headline)
+            Text("Add audio files to the Songs folder to build your library.")
+                .font(.subheadline).foregroundColor(.secondary)
+        }
+        .padding(.vertical, 12)
+    }
+
+    private var allAlbumsView: some View {
+        NavigationView {
+            List(allLibraryAlbums) { album in
+                NavigationLink {
+                    albumDetail(album, showCloseButton: false)
+                } label: {
+                    HStack(spacing: 12) {
+                        artwork(album.artworkTrack, size: 54)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(album.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                            Text("\(album.artist) · \(album.tracks.count) songs")
+                                .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("Albums")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { albumSheet = nil }
+                }
+            }
+        }
+    }
+
+    private func albumDetail(_ album: AlbumCollection, showCloseButton: Bool = true) -> some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack {
+                    Text("ALBUM").font(.system(size: 11, weight: .bold, design: .rounded)).tracking(1.2).foregroundColor(.secondary)
+                    Spacer()
+                    if showCloseButton {
+                        Button { albumSheet = nil } label: {
+                            Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundColor(.secondary)
+                                .frame(width: 34, height: 34).background(Color(uiColor: .tertiarySystemGroupedBackground), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close album")
+                    }
+                }
+                HStack(spacing: 18) {
+                    artwork(album.artworkTrack, size: 112)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(album.title).font(.system(size: 22, weight: .bold, design: .rounded))
+                        Text(album.artist).font(.subheadline).foregroundColor(.secondary)
+                        Text("\(album.tracks.count) songs · \(album.discNumbers.count) \(album.discNumbers.count == 1 ? "disc" : "discs")")
+                            .font(.caption).foregroundColor(.secondary)
+                        Button { play(album.tracks[0], queue: album.tracks) } label: {
+                            Label("Play album", systemImage: "play.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14).padding(.vertical, 9)
+                                .background(Color.accentColor, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 4)
+                    }
+                    Spacer(minLength: 0)
+                }
+                ForEach(album.discNumbers, id: \.self) { disc in
+                    VStack(alignment: .leading, spacing: 8) {
+                        if album.discNumbers.count > 1 {
+                            Text("DISC \(disc)").font(.system(size: 11, weight: .bold, design: .rounded)).tracking(1.2).foregroundColor(.secondary)
+                        }
+                        ForEach(album.tracks.filter { $0.discNumber == disc }) { track in
+                            trackRow(track, queue: album.tracks)
+                        }
+                    }
+                }
+            }
+            .padding(20)
+            .padding(.bottom, 20)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private func trackRow(_ track: Track, showFavorite: Bool = false, queue: [Track]? = nil) -> some View {
+        let isCurrentTrack = playback.currentTrackID == track.id
+        return HStack(spacing: 12) {
+            Button { play(track, queue: queue ?? tracks) } label: { artwork(track, size: 52) }
+                .buttonStyle(.plain)
+            Button { play(track, queue: queue ?? tracks) } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(track.title).font(.system(size: 15, weight: .semibold)).foregroundColor(isCurrentTrack ? .accentColor : .primary).lineLimit(1)
+                    Text(track.artist).font(.system(size: 12)).foregroundColor(isCurrentTrack ? .accentColor.opacity(0.8) : .secondary).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Image(systemName: track.quality.localizedCaseInsensitiveContains("spatial") ? "dot.radiowaves.left.and.right" : "waveform")
+                        Text(track.quality)
+                    }
+                    .font(.system(size: 9, weight: .bold, design: .rounded)).tracking(0.5).foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if showFavorite {
+                Button { toggleFavorite(track) } label: {
+                    Image(systemName: favorites.contains(track.title) ? "heart.fill" : "heart").foregroundColor(.pink).frame(width: 32, height: 40)
+                }.buttonStyle(.plain)
+            }
+            Text(track.duration).font(.caption).foregroundColor(.secondary)
+            Button {} label: { Image(systemName: "ellipsis").foregroundColor(.secondary).frame(width: 28, height: 40) }.buttonStyle(.plain)
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(isCurrentTrack ? Color.accentColor.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func artwork(_ track: Track, size: CGFloat) -> some View {
+        ZStack {
+            LinearGradient(colors: [track.tint, track.tint.opacity(0.62)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Circle().stroke(Color.white.opacity(0.18), lineWidth: size * 0.06).frame(width: size * 0.7, height: size * 0.7)
+            Image(systemName: track.artwork).font(.system(size: size * 0.31, weight: .light)).foregroundColor(.white.opacity(0.9))
+            let coverImage: UIImage? = {
+                if let artworkURL = track.artworkURL, let image = UIImage(contentsOfFile: artworkURL.path) { return image }
+                if let artworkData = track.artworkData { return UIImage(data: artworkData) }
+                return nil
+            }()
+            if let coverImage {
+                Image(uiImage: coverImage).resizable().scaledToFill().frame(width: size, height: size).clipped()
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.13, style: .continuous))
+    }
+
+    private func artworkColor(for track: Track) -> Color {
+        let image: UIImage?
+        if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
+            image = fileImage
+        } else if let artworkData = track.artworkData {
+            image = UIImage(data: artworkData)
+        } else {
+            image = nil
+        }
+        guard let cgImage = image?.cgImage else { return track.tint }
+
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        pixel.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: 1,
+                height: 1,
+                bitsPerComponent: 8,
+                bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: bitmapInfo
+            ) else { return }
+            context.interpolationQuality = .low
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return Color(.sRGB, red: Double(pixel[0]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[2]) / 255, opacity: 1)
+    }
+
+    private func duration(for track: Track) -> TimeInterval {
+        let parts = track.duration.split(separator: ":").compactMap { Double($0) }
+        guard parts.count == 2 else { return 0 }
+        return parts[0] * 60 + parts[1]
+    }
+
+    private func timeString(_ time: TimeInterval) -> String {
+        let seconds = max(0, Int(time))
+        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+
+    private func play(_ track: Track) {
+        play(track, queue: tracks)
+    }
+
+    private func play(_ track: Track, queue: [Track]) {
+        currentTrack = track
+        playback.play(track, queue: queue)
+    }
+
+    private func toggleFavorite(_ track: Track) {
+        if favorites.contains(track.title) { favorites.remove(track.title) }
+        else { favorites.insert(track.title) }
+    }
+
+}
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+        ContentView()
     }
 }
