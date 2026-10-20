@@ -6,7 +6,7 @@ workflows:
 
     # Create this App Store Connect integration in Codemagic with an App Manager API key.
     integrations:
-      app_store_connect: Concert App Store Connect
+      app_store_connect: Codemagic Latest
 
     environment:
       # Use Codemagic's current Xcode image for App Store Connect compatibility.
