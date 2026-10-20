@@ -89,6 +89,7 @@ workflows:
         script: |
           xcode-project use-profiles \
             --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --archive-method app-store \
             --code-signing-setup-verbose-logging \
             --custom-export-options='{"testFlightInternalTestingOnly": true}'
 
