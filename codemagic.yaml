@@ -11,11 +11,12 @@ workflows:
     environment:
       groups:
         - ios_signing
-      # Use Codemagic's current Xcode image for App Store Connect compatibility.
-      xcode: latest
+      # Use Codemagic's Xcode 27.2 edge image.
+      xcode: "27.2"
       # Signing profiles are fetched or created by the App Store Connect CLI step below.
       vars:
         BUNDLE_ID: Foundation.Concert
+        LIVE_ACTIVITY_BUNDLE_ID: Foundation.Concert.LiveActivity
         XCODE_PROJECT: Concert.xcodeproj
         XCODE_SCHEME: Concert
 
@@ -23,9 +24,12 @@ workflows:
       - name: Initialize signing keychain
         script: keychain initialize
 
-      - name: Fetch App Store signing files
+      - name: Fetch app and Live Activity signing files
         script: |
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+          app-store-connect fetch-signing-files "$LIVE_ACTIVITY_BUNDLE_ID" \
             --type IOS_APP_STORE \
             --create
 
