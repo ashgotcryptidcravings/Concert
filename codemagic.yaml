@@ -36,9 +36,60 @@ workflows:
       - name: Install signing certificate
         script: keychain add-certificates
 
+      - name: Verify fetched profile entitlements
+        script: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import plistlib
+          import subprocess
+          import sys
+
+          expected = {
+              os.environ["BUNDLE_ID"]: True,
+              os.environ["LIVE_ACTIVITY_BUNDLE_ID"]: False,
+          }
+          found = set()
+          profile_dir = os.path.expanduser("~/Library/Developer/Xcode/UserData/Provisioning Profiles")
+
+          for path in glob.glob(os.path.join(profile_dir, "*.mobileprovision")):
+              try:
+                  decoded = subprocess.check_output(["security", "cms", "-D", "-i", path])
+                  profile = plistlib.loads(decoded)
+              except Exception as error:
+                  print(f"Could not inspect {os.path.basename(path)}: {error}")
+                  continue
+
+              entitlements = profile.get("Entitlements", {})
+              application_id = entitlements.get("application-identifier", "")
+              bundle_id = application_id.split(".", 1)[-1]
+              if bundle_id not in expected:
+                  continue
+
+              found.add(bundle_id)
+              has_group_activities = entitlements.get("com.apple.developer.group-session") is True
+              print(
+                  f"Profile {profile.get('Name', os.path.basename(path))}: "
+                  f"bundle={bundle_id}, UUID={profile.get('UUID')}, "
+                  f"Group Activities={has_group_activities}"
+              )
+              if expected[bundle_id] and not has_group_activities:
+                  sys.exit(
+                      f"The {bundle_id} provisioning profile lacks Group Activities. "
+                      "Enable Group Activities on this exact App ID in the Apple Developer portal, "
+                      "then regenerate its App Store profile."
+                  )
+
+          missing = set(expected) - found
+          if missing:
+              sys.exit("No fetched App Store provisioning profile found for: " + ", ".join(sorted(missing)))
+          PY
+
       - name: Configure signing for internal TestFlight
         script: |
           xcode-project use-profiles \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --code-signing-setup-verbose-logging \
             --custom-export-options='{"testFlightInternalTestingOnly": true}'
 
       - name: Set the TestFlight build number
