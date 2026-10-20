@@ -11,9 +11,7 @@ workflows:
     environment:
       # Use Codemagic's current Xcode image for App Store Connect compatibility.
       xcode: latest
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: Foundation.Concert
+      # Signing profiles are fetched or created by the App Store Connect CLI step below.
       vars:
         BUNDLE_ID: Foundation.Concert
         XCODE_PROJECT: Concert.xcodeproj
