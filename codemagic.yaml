@@ -1,0 +1,60 @@
+workflows:
+  testflight-internal:
+    name: Concert - TestFlight Internal Only
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    # Create this App Store Connect integration in Codemagic with an App Manager API key.
+    integrations:
+      app_store_connect: Concert App Store Connect
+
+    environment:
+      # Use Codemagic's current Xcode image for App Store Connect compatibility.
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: Foundation.Concert
+      vars:
+        BUNDLE_ID: Foundation.Concert
+        XCODE_PROJECT: Concert.xcodeproj
+        XCODE_SCHEME: Concert
+
+    scripts:
+      - name: Initialize signing keychain
+        script: keychain initialize
+
+      - name: Fetch App Store signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+
+      - name: Install signing certificate
+        script: keychain add-certificates
+
+      - name: Configure signing for internal TestFlight
+        script: |
+          xcode-project use-profiles \
+            --custom-export-options='{"testFlightInternalTestingOnly": true}'
+
+      - name: Set the TestFlight build number
+        script: |
+          agvtool new-version -all "$PROJECT_BUILD_NUMBER"
+
+      - name: Build signed IPA
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        # Internal-only export skips external TestFlight beta review and App Store review.
+        submit_to_testflight: false
+        submit_to_app_store: false
