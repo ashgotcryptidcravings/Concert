@@ -11,8 +11,8 @@ workflows:
     environment:
       groups:
         - ios_signing
-      # Use Codemagic's Xcode 27.2 edge image.
-      xcode: "27.2"
+      # Xcode 27.1 is accepted by App Store Connect for TestFlight uploads.
+      xcode: "27.1"
       # Signing profiles are fetched or created by the App Store Connect CLI step below.
       vars:
         BUNDLE_ID: Foundation.Concert
