@@ -381,6 +381,24 @@ final class ConcertPlayback: ObservableObject {
         return repeatMode == .all ? following + Array(queue.prefix(queueIndex)) : following
     }
 
+    func addToQueue(_ track: Track) {
+        guard !queue.contains(where: { $0.id == track.id }) else { return }
+        queue.append(track)
+        if !originalQueue.contains(where: { $0.id == track.id }) {
+            originalQueue.append(track)
+        }
+    }
+
+    func removeFromQueue(_ track: Track) {
+        guard track.id != currentTrackID,
+              let index = queue.firstIndex(where: { $0.id == track.id }) else { return }
+        queue.remove(at: index)
+        originalQueue.removeAll { $0.id == track.id }
+        if index < queueIndex {
+            queueIndex -= 1
+        }
+    }
+
     func updateLibrary(_ tracks: [Track]) {
         library = tracks
         if queue.isEmpty {

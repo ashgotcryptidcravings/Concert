@@ -1040,7 +1040,30 @@ struct ContentView: View {
                 }.buttonStyle(.plain)
             }
             Text(track.duration).font(.caption).foregroundColor(.secondary)
-            Button {} label: { Image(systemName: "ellipsis").foregroundColor(.secondary).frame(width: 28, height: 40) }.buttonStyle(.plain)
+            Menu {
+                Button {
+                    toggleFavorite(track)
+                } label: {
+                    Label(favorites.contains(track.libraryKey) ? "Remove from Favorites" : "Favorite", systemImage: favorites.contains(track.libraryKey) ? "heart.slash" : "heart")
+                }
+
+                if playback.currentQueue.contains(where: { $0.id == track.id }), playback.currentTrackID != track.id {
+                    Button(role: .destructive) {
+                        playback.removeFromQueue(track)
+                    } label: {
+                        Label("Remove from Queue", systemImage: "minus.circle")
+                    }
+                } else if !playback.currentQueue.contains(where: { $0.id == track.id }) {
+                    Button {
+                        playback.addToQueue(track)
+                    } label: {
+                        Label("Add to Queue", systemImage: "text.badge.plus")
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis").foregroundColor(.secondary).frame(width: 32, height: 40).contentShape(Rectangle())
+            }
+            .accessibilityLabel("More actions for \(track.title)")
         }
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
