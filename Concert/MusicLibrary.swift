@@ -335,6 +335,7 @@ final class ConcertPlayback: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTrackID: UUID?
     let metrics = ConcertPlaybackMetrics()
+    let equalizerSettings = ConcertEqualizerSettings()
     var currentTime: TimeInterval {
         get { metrics.currentTime }
         set { metrics.currentTime = newValue }
@@ -350,12 +351,6 @@ final class ConcertPlayback: ObservableObject {
     private var lastAudioLevelUpdate: UInt64 = 0
     @Published var crossfadeDuration: Double = 0
     @Published var autoplayEnabled = false
-    @Published var equalizerBandValues = Array(repeating: 0.0, count: 10) {
-        didSet { applyEqualizerSettings() }
-    }
-    @Published var equalizerPreamp = 0.0 {
-        didSet { applyEqualizerSettings() }
-    }
     @Published private(set) var shuffleEnabled = false
     @Published private(set) var repeatMode: RepeatMode = .off
     @Published private(set) var sharePlayActive = false
@@ -464,11 +459,38 @@ final class ConcertPlayback: ObservableObject {
 
     private func applyEqualizerSettings() {
         for deck in decks {
-            deck.equalizer.globalGain = Float(min(12, max(-12, equalizerPreamp)))
-            for (index, band) in deck.equalizer.bands.enumerated() where index < equalizerBandValues.count {
-                band.gain = Float(min(12, max(-12, equalizerBandValues[index])))
+            deck.equalizer.globalGain = Float(min(12, max(-12, equalizerSettings.preamp)))
+            for (index, band) in deck.equalizer.bands.enumerated() where index < equalizerSettings.bandValues.count {
+                band.gain = Float(min(12, max(-12, equalizerSettings.bandValues[index])))
             }
         }
+    }
+
+    func setEqualizerBand(_ value: Double, at index: Int) {
+        guard equalizerSettings.bandValues.indices.contains(index) else { return }
+        equalizerSettings.bandValues[index] = value
+        for deck in decks where deck.equalizer.bands.indices.contains(index) {
+            deck.equalizer.bands[index].gain = Float(min(12, max(-12, value)))
+        }
+    }
+
+    func setEqualizerPreset(_ preset: String, bands: [Double]) {
+        equalizerSettings.preset = preset
+        equalizerSettings.bandValues = bands
+        applyEqualizerSettings()
+    }
+
+    func setEqualizerPreamp(_ value: Double) {
+        equalizerSettings.preamp = value
+        let gain = Float(min(12, max(-12, value)))
+        for deck in decks { deck.equalizer.globalGain = gain }
+    }
+
+    func restoreEqualizer(preset: String, bands: [Double], preamp: Double) {
+        equalizerSettings.preset = preset
+        equalizerSettings.bandValues = bands
+        equalizerSettings.preamp = preamp
+        applyEqualizerSettings()
     }
 
     func startSharePlay() {
@@ -901,5 +923,11 @@ final class ConcertPlaybackMetrics: ObservableObject {
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
     @Published var audioLevel: Double = 0
+}
+
+final class ConcertEqualizerSettings: ObservableObject {
+    @Published var preset = "Flat"
+    @Published var bandValues = Array(repeating: 0.0, count: 10)
+    @Published var preamp = 0.0
 }
 

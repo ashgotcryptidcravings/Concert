@@ -191,6 +191,115 @@ private struct PlayerAtmosphere: View {
     }
 }
 
+private struct EqualizerControls: View {
+    @ObservedObject private var settings: ConcertEqualizerSettings
+    private let playback: ConcertPlayback
+    private let onCommit: () -> Void
+
+    init(playback: ConcertPlayback, onCommit: @escaping () -> Void) {
+        self.playback = playback
+        self.onCommit = onCommit
+        _settings = ObservedObject(wrappedValue: playback.equalizerSettings)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Equalizer", systemImage: "slider.vertical.3")
+                    .font(.system(size: 15, weight: .medium))
+                Spacer()
+                Picker("Equalizer preset", selection: Binding(
+                    get: { settings.preset },
+                    set: selectPreset
+                )) {
+                    ForEach(equalizerPresets.keys.sorted(), id: \.self) { preset in
+                        Text(preset).tag(preset)
+                    }
+                    Text("Custom").tag("Custom")
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(ConcertPlayback.equalizerFrequencies.indices, id: \.self) { index in
+                    VStack(spacing: 7) {
+                        Text(bandLabel(index))
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                        Slider(
+                            value: Binding(
+                                get: { settings.bandValues[index] },
+                                set: { value in
+                                    settings.preset = "Custom"
+                                    playback.setEqualizerBand(value, at: index)
+                                }
+                            ),
+                            in: -12...12,
+                            onEditingChanged: { editing in if !editing { onCommit() } }
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 94, height: 22)
+                        .frame(width: 26, height: 94)
+                        Text(String(format: "%+.0f", settings.bandValues[index]))
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(height: 11)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(.vertical, 4)
+            HStack {
+                Text("10 bands · ±12 dB")
+                    .font(.caption).foregroundColor(.secondary)
+                Spacer()
+                Button("Reset", action: reset)
+                    .font(.caption.weight(.semibold))
+            }
+            VStack(spacing: 4) {
+                HStack {
+                    Text("Preamp").font(.caption.weight(.medium))
+                    Spacer()
+                    Text(String(format: "%+.0f dB", settings.preamp))
+                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { settings.preamp },
+                        set: playback.setEqualizerPreamp
+                    ),
+                    in: -12...12,
+                    onEditingChanged: { editing in if !editing { onCommit() } }
+                )
+            }
+        }
+        .padding(12)
+        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func selectPreset(_ preset: String) {
+        guard let bands = equalizerPresets[preset] else {
+            settings.preset = preset
+            onCommit()
+            return
+        }
+        playback.setEqualizerPreset(preset, bands: bands)
+        onCommit()
+    }
+
+    private func reset() {
+        playback.setEqualizerPreset("Flat", bands: equalizerPresets["Flat"] ?? Array(repeating: 0, count: 10))
+        playback.setEqualizerPreamp(0)
+        onCommit()
+    }
+
+    private func bandLabel(_ index: Int) -> String {
+        ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"][index]
+    }
+}
+
 private let loadingTrack = Track(
     title: "",
     artist: "",
@@ -221,7 +330,6 @@ struct ContentView: View {
     @State private var albumSheet: AlbumSheet?
     @State private var searchText = ""
     @State private var audioQuality = "All qualities"
-    @State private var equalizerPreset = "Flat"
     @State private var playerBackground = Color(uiColor: .systemGroupedBackground)
     @StateObject private var playback = ConcertPlayback()
 
@@ -321,12 +429,6 @@ struct ContentView: View {
         .onChange(of: audioQuality) { _ in persistSettings() }
         .onChange(of: playback.crossfadeDuration) { _ in persistSettings() }
         .onChange(of: playback.autoplayEnabled) { _ in persistSettings() }
-        .onChange(of: equalizerPreset) { preset in
-            if let bands = equalizerPresets[preset] { playback.equalizerBandValues = bands }
-            persistSettings()
-        }
-        .onChange(of: playback.equalizerBandValues) { _ in persistSettings() }
-        .onChange(of: playback.equalizerPreamp) { _ in persistSettings() }
     }
 
     private var discoverView: some View {
@@ -518,60 +620,7 @@ struct ContentView: View {
                             Text("Spatial").tag("Full Spatial Lossless")
                         }
                         .pickerStyle(.segmented)
-                        VStack(alignment: .leading, spacing: 14) {
-                            HStack {
-                                Label("Equalizer", systemImage: "slider.vertical.3")
-                                    .font(.system(size: 15, weight: .medium))
-                                Spacer()
-                                Picker("Equalizer preset", selection: $equalizerPreset) {
-                                    ForEach(equalizerPresets.keys.sorted(), id: \.self) { preset in
-                                        Text(preset).tag(preset)
-                                    }
-                                    Text("Custom").tag("Custom")
-                                }
-                                .labelsHidden()
-                                .pickerStyle(.menu)
-                            }
-                            HStack(alignment: .center, spacing: 2) {
-                                ForEach(ConcertPlayback.equalizerFrequencies.indices, id: \.self) { index in
-                                    VStack(spacing: 7) {
-                                        Text(equalizerBandLabel(index))
-                                            .font(.system(size: 9, weight: .medium, design: .rounded))
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                            .minimumScaleFactor(0.7)
-                                        Slider(value: equalizerBandBinding(index), in: -12...12)
-                                            .rotationEffect(.degrees(-90))
-                                            .frame(width: 94, height: 22)
-                                            .frame(width: 26, height: 94)
-                                        Text(String(format: "%+.0f", playback.equalizerBandValues[index]))
-                                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                            .foregroundColor(.secondary)
-                                            .frame(height: 11)
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                            HStack {
-                                Text("10 bands · ±12 dB")
-                                    .font(.caption).foregroundColor(.secondary)
-                                Spacer()
-                                Button("Reset") { resetEqualizer() }
-                                    .font(.caption.weight(.semibold))
-                            }
-                            VStack(spacing: 4) {
-                                HStack {
-                                    Text("Preamp").font(.caption.weight(.medium))
-                                    Spacer()
-                                    Text(String(format: "%+.0f dB", playback.equalizerPreamp))
-                                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
-                                }
-                                Slider(value: $playback.equalizerPreamp, in: -12...12)
-                            }
-                        }
-                        .padding(12)
-                        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                        EqualizerControls(playback: playback) { persistSettings() }
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Crossfade").font(.system(size: 15, weight: .medium))
@@ -637,16 +686,16 @@ struct ContentView: View {
             audioQuality = settings.value(forKey: "audioQuality") as? String ?? "All qualities"
             playback.crossfadeDuration = settings.value(forKey: "crossfadeDuration") as? Double ?? 0
             playback.autoplayEnabled = settings.value(forKey: "autoplayEnabled") as? Bool ?? false
-            playback.equalizerPreamp = settings.value(forKey: "equalizerPreamp") as? Double ?? 0
-            equalizerPreset = settings.value(forKey: "equalizerPreset") as? String ?? "Flat"
+            let preset = settings.value(forKey: "equalizerPreset") as? String ?? "Flat"
+            let preamp = settings.value(forKey: "equalizerPreamp") as? Double ?? 0
+            var bandValues = equalizerPresets[preset] ?? equalizerPresets["Flat"] ?? Array(repeating: 0, count: 10)
             if let savedBands = settings.value(forKey: "equalizerBandValues") as? String {
                 let values = savedBands.split(separator: ",").compactMap { Double($0) }
                 if values.count == ConcertPlayback.equalizerFrequencies.count {
-                    playback.equalizerBandValues = values
+                    bandValues = values
                 }
-            } else if let presetBands = equalizerPresets[equalizerPreset] {
-                playback.equalizerBandValues = presetBands
             }
+            playback.restoreEqualizer(preset: preset, bands: bandValues, preamp: preamp)
         }
         settingsLoaded = true
     }
@@ -661,9 +710,9 @@ struct ContentView: View {
         record.setValue(audioQuality, forKey: "audioQuality")
         record.setValue(playback.crossfadeDuration, forKey: "crossfadeDuration")
         record.setValue(playback.autoplayEnabled, forKey: "autoplayEnabled")
-        record.setValue(equalizerPreset, forKey: "equalizerPreset")
-        record.setValue(playback.equalizerBandValues.map { String(format: "%.2f", $0) }.joined(separator: ","), forKey: "equalizerBandValues")
-        record.setValue(playback.equalizerPreamp, forKey: "equalizerPreamp")
+        record.setValue(playback.equalizerSettings.preset, forKey: "equalizerPreset")
+        record.setValue(playback.equalizerSettings.bandValues.map { String(format: "%.2f", $0) }.joined(separator: ","), forKey: "equalizerBandValues")
+        record.setValue(playback.equalizerSettings.preamp, forKey: "equalizerPreamp")
         record.setValue(Date(), forKey: "updatedAt")
         saveContext()
     }
@@ -698,31 +747,6 @@ struct ContentView: View {
         guard viewContext.hasChanges else { return }
         do { try viewContext.save() }
         catch { NSLog("Concert Core Data save failed: %@", error.localizedDescription) }
-    }
-
-    private func equalizerBandBinding(_ index: Int) -> Binding<Double> {
-        Binding(
-            get: { playback.equalizerBandValues[index] },
-            set: { value in
-                equalizerPreset = "Custom"
-                playback.equalizerBandValues[index] = value
-            }
-        )
-    }
-
-    private func equalizerBandLabel(_ index: Int) -> String {
-        ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"][index]
-    }
-
-    private func selectEqualizerPreset(_ preset: String) {
-        guard let bands = equalizerPresets[preset] else { return }
-        equalizerPreset = preset
-        playback.equalizerBandValues = bands
-    }
-
-    private func resetEqualizer() {
-        selectEqualizerPreset("Flat")
-        playback.equalizerPreamp = 0
     }
 
     private var nowPlayingBar: some View {
@@ -1132,13 +1156,15 @@ struct ContentView: View {
             if let previousArtworkTrack, previousArtworkTrack.id != track.id {
                 artwork(previousArtworkTrack, size: size)
                     .opacity(1 - artworkTransitionProgress)
+                    .blur(radius: artworkTransitionProgress * 12)
                     .accessibilityHidden(true)
             }
             artwork(track, size: size)
                 .opacity(artworkTransitionProgress)
+                .blur(radius: (1 - artworkTransitionProgress) * 12)
         }
         .frame(width: size, height: size)
-        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.13, style: .continuous))
     }
 
     private func transitioningTrackLabel(_ text: String, previous: String?, font: Font, color: Color) -> some View {
