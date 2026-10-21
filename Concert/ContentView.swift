@@ -63,6 +63,134 @@ private struct AirPlayRouteButton: UIViewRepresentable {
     func updateUIView(_ picker: AVRoutePickerView, context: Context) {}
 }
 
+private struct PlaybackProgressIndicator: View {
+    @ObservedObject var metrics: ConcertPlaybackMetrics
+
+    var body: some View {
+        GeometryReader { proxy in
+            let progress = metrics.duration > 0 ? metrics.currentTime / metrics.duration : 0
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(width: proxy.size.width * min(1, max(0, progress)), height: 2)
+        }
+    }
+}
+
+private struct PlaybackSeekBar: View {
+    @ObservedObject var metrics: ConcertPlaybackMetrics
+    let playback: ConcertPlayback
+    let fallbackDuration: TimeInterval
+    @State private var isSeeking = false
+    @State private var previewProgress: Double = 0
+
+    var body: some View {
+        VStack(spacing: 4) {
+            GeometryReader { proxy in
+                let liveProgress = min(1, max(0, metrics.currentTime / max(metrics.duration, 1)))
+                let progress = isSeeking ? previewProgress : liveProgress
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
+                    Capsule().fill(Color.primary).frame(width: max(4, proxy.size.width * progress), height: 4)
+                    Circle().fill(Color(uiColor: .systemBackground)).frame(width: 22, height: 22)
+                        .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                        .offset(x: max(0, min(proxy.size.width - 22, proxy.size.width * progress - 11)))
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isSeeking = true
+                        previewProgress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
+                    }
+                    .onEnded { value in
+                        let progress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
+                        playback.seek(to: progress * max(metrics.duration, 0))
+                        isSeeking = false
+                    })
+            }
+            .frame(height: 30)
+            .accessibilityElement()
+            .accessibilityLabel("Playback position")
+            .accessibilityValue(timeString(metrics.currentTime))
+            HStack {
+                Text(timeString(metrics.currentTime))
+                Spacer()
+                Text(timeString(metrics.duration > 0 ? metrics.duration : fallbackDuration))
+            }
+            .font(.caption2).foregroundColor(.secondary)
+        }
+    }
+
+    private func timeString(_ time: TimeInterval) -> String {
+        guard time.isFinite else { return "0:00" }
+        let seconds = max(0, Int(time))
+        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+private struct PlayerAtmosphere: View {
+    @ObservedObject var playback: ConcertPlayback
+    @ObservedObject var metrics: ConcertPlaybackMetrics
+    let playerBackground: Color
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        GeometryReader { backgroundGeometry in
+            let audioPulse = CGFloat(metrics.audioLevel)
+            let darkMode = colorScheme == .dark
+            ZStack {
+                Color(uiColor: .systemGroupedBackground)
+                LinearGradient(
+                    colors: [
+                        playerBackground.opacity(darkMode ? 0.28 : 0.48),
+                        playerBackground.opacity(darkMode ? 0.12 : 0.20),
+                        Color(uiColor: .systemGroupedBackground)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                Circle()
+                    .fill(playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.24 : 0.18) + metrics.audioLevel * 0.34 : 0.08))
+                    .frame(width: backgroundGeometry.size.width * 1.25)
+                    .blur(radius: 76)
+                    .scaleEffect(playback.isPlaying ? 0.94 + audioPulse * 0.46 : 0.88)
+                    .offset(
+                        x: (playback.isPlaying ? backgroundGeometry.size.width * 0.20 : -backgroundGeometry.size.width * 0.22) + backgroundGeometry.size.width * audioPulse * 0.18,
+                        y: (playback.isPlaying ? -backgroundGeometry.size.height * 0.24 : -backgroundGeometry.size.height * 0.12) - backgroundGeometry.size.height * audioPulse * 0.07
+                    )
+                Circle()
+                    .fill(playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.16 : 0.10) + metrics.audioLevel * 0.30 : 0.06))
+                    .frame(width: backgroundGeometry.size.width * 0.94)
+                    .blur(radius: 68)
+                    .scaleEffect(playback.isPlaying ? 1.05 - audioPulse * 0.32 : 1.08)
+                    .offset(
+                        x: (playback.isPlaying ? -backgroundGeometry.size.width * 0.20 : backgroundGeometry.size.width * 0.20) - backgroundGeometry.size.width * audioPulse * 0.16,
+                        y: (playback.isPlaying ? backgroundGeometry.size.height * 0.32 : backgroundGeometry.size.height * 0.42) + backgroundGeometry.size.height * audioPulse * 0.08
+                    )
+                Circle()
+                    .fill(Color.accentColor.opacity(playback.isPlaying ? 0.08 + metrics.audioLevel * 0.24 : 0.035))
+                    .frame(width: backgroundGeometry.size.width * 0.68)
+                    .blur(radius: 54)
+                    .scaleEffect(playback.isPlaying ? 0.72 + audioPulse * 0.70 : 0.8)
+                    .offset(
+                        x: (playback.isPlaying ? -backgroundGeometry.size.width * 0.12 : backgroundGeometry.size.width * 0.16) + backgroundGeometry.size.width * audioPulse * 0.22,
+                        y: (playback.isPlaying ? -backgroundGeometry.size.height * 0.02 : backgroundGeometry.size.height * 0.08) - backgroundGeometry.size.height * audioPulse * 0.18
+                    )
+            }
+            .allowsHitTesting(false)
+            .animation(
+                playback.isPlaying
+                    ? Animation.easeInOut(duration: 9).repeatForever(autoreverses: true)
+                    : Animation.easeOut(duration: 0.7),
+                value: playback.isPlaying
+            )
+            .animation(.linear(duration: 0.1), value: metrics.audioLevel)
+            .animation(.easeInOut(duration: 0.8), value: playerBackground)
+            .animation(.easeInOut(duration: 0.5), value: colorScheme)
+        }
+    }
+}
+
 private let loadingTrack = Track(
     title: "",
     artist: "",
@@ -89,8 +217,6 @@ struct ContentView: View {
     @State private var isLoadingLibrary = true
     @State private var showingPlayer = false
     @State private var playerDetent: PresentationDetent = .medium
-    @State private var isSeeking = false
-    @State private var seekPreviewProgress: Double = 0
     @State private var showingSettings = false
     @State private var albumSheet: AlbumSheet?
     @State private var searchText = ""
@@ -644,11 +770,8 @@ struct ContentView: View {
         .padding(.vertical, 8)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(alignment: .bottomLeading) {
-            GeometryReader { proxy in
-                let progress = !isLoadingLibrary && playback.duration > 0 ? playback.currentTime / playback.duration : 0
-                Capsule().fill(Color.accentColor).frame(width: proxy.size.width * progress, height: 2)
-            }
-            .frame(height: 2)
+            PlaybackProgressIndicator(metrics: playback.metrics)
+                .frame(height: 2)
             .padding(.horizontal, 2)
         }
         .padding(.horizontal, 12)
@@ -676,41 +799,7 @@ struct ContentView: View {
                                 .font(.system(size: 23)).foregroundColor(favorites.contains(currentTrack.libraryKey) ? .pink : .secondary)
                         }.buttonStyle(.plain)
                     }
-                    VStack(spacing: 4) {
-                        GeometryReader { proxy in
-                            let liveProgress = min(1, max(0, playback.currentTime / max(playback.duration, 1)))
-                            let progress = isSeeking ? seekPreviewProgress : liveProgress
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
-                                Capsule().fill(Color.primary).frame(width: max(4, proxy.size.width * progress), height: 4)
-                                Circle().fill(Color(uiColor: .systemBackground)).frame(width: 22, height: 22)
-                                    .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-                                    .offset(x: max(0, min(proxy.size.width - 22, proxy.size.width * progress - 11)))
-                            }
-                            .frame(maxHeight: .infinity)
-                            .contentShape(Rectangle())
-                            .gesture(DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    isSeeking = true
-                                    seekPreviewProgress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
-                                }
-                                .onEnded { value in
-                                    let progress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
-                                    playback.seek(to: progress * max(playback.duration, 0))
-                                    isSeeking = false
-                                })
-                        }
-                        .frame(height: 30)
-                        .accessibilityElement()
-                        .accessibilityLabel("Playback position")
-                        .accessibilityValue(timeString(playback.currentTime))
-                        HStack {
-                            Text(timeString(playback.currentTime))
-                            Spacer()
-                            Text(timeString(playback.duration > 0 ? playback.duration : duration(for: currentTrack)))
-                        }
-                        .font(.caption2).foregroundColor(.secondary)
-                    }
+                    PlaybackSeekBar(metrics: playback.metrics, playback: playback, fallbackDuration: duration(for: currentTrack))
                     HStack(spacing: 18 + expansion * 20) {
                         Button { playback.toggleShuffle() } label: {
                             Image(systemName: "shuffle").font(.system(size: 19))
@@ -764,65 +853,14 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                playerAtmosphere
+                PlayerAtmosphere(
+                    playback: playback,
+                    metrics: playback.metrics,
+                    playerBackground: playerBackground,
+                    colorScheme: colorScheme
+                )
                     .ignoresSafeArea()
             }
-        }
-    }
-
-    private var playerAtmosphere: some View {
-        GeometryReader { backgroundGeometry in
-            let audioPulse = CGFloat(playback.audioLevel)
-            let darkMode = colorScheme == .dark
-            ZStack {
-                Color(uiColor: .systemGroupedBackground)
-                LinearGradient(
-                    colors: [
-                        playerBackground.opacity(darkMode ? 0.28 : 0.48),
-                        playerBackground.opacity(darkMode ? 0.12 : 0.20),
-                        Color(uiColor: .systemGroupedBackground)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                Circle()
-                    .fill(playerBackground.opacity(isPlaying ? (darkMode ? 0.24 : 0.18) + playback.audioLevel * 0.34 : 0.08))
-                    .frame(width: backgroundGeometry.size.width * 1.25)
-                    .blur(radius: 76)
-                    .scaleEffect(isPlaying ? 0.94 + audioPulse * 0.46 : 0.88)
-                    .offset(
-                        x: (isPlaying ? backgroundGeometry.size.width * 0.20 : -backgroundGeometry.size.width * 0.22) + backgroundGeometry.size.width * audioPulse * 0.18,
-                        y: (isPlaying ? -backgroundGeometry.size.height * 0.24 : -backgroundGeometry.size.height * 0.12) - backgroundGeometry.size.height * audioPulse * 0.07
-                    )
-                Circle()
-                    .fill(playerBackground.opacity(isPlaying ? (darkMode ? 0.16 : 0.10) + playback.audioLevel * 0.30 : 0.06))
-                    .frame(width: backgroundGeometry.size.width * 0.94)
-                    .blur(radius: 68)
-                    .scaleEffect(isPlaying ? 1.05 - audioPulse * 0.32 : 1.08)
-                    .offset(
-                        x: (isPlaying ? -backgroundGeometry.size.width * 0.20 : backgroundGeometry.size.width * 0.20) - backgroundGeometry.size.width * audioPulse * 0.16,
-                        y: (isPlaying ? backgroundGeometry.size.height * 0.32 : backgroundGeometry.size.height * 0.42) + backgroundGeometry.size.height * audioPulse * 0.08
-                    )
-                Circle()
-                    .fill(Color.accentColor.opacity(isPlaying ? 0.08 + playback.audioLevel * 0.24 : 0.035))
-                    .frame(width: backgroundGeometry.size.width * 0.68)
-                    .blur(radius: 54)
-                    .scaleEffect(isPlaying ? 0.72 + audioPulse * 0.70 : 0.8)
-                    .offset(
-                        x: (isPlaying ? -backgroundGeometry.size.width * 0.12 : backgroundGeometry.size.width * 0.16) + backgroundGeometry.size.width * audioPulse * 0.22,
-                        y: (isPlaying ? -backgroundGeometry.size.height * 0.02 : backgroundGeometry.size.height * 0.08) - backgroundGeometry.size.height * audioPulse * 0.18
-                    )
-            }
-            .allowsHitTesting(false)
-            .animation(
-                isPlaying
-                    ? Animation.easeInOut(duration: 9).repeatForever(autoreverses: true)
-                    : Animation.easeOut(duration: 0.7),
-                value: isPlaying
-            )
-            .animation(.easeOut(duration: 0.24), value: playback.audioLevel)
-            .animation(.easeInOut(duration: 0.8), value: playerBackground)
-            .animation(.easeInOut(duration: 0.5), value: colorScheme)
         }
     }
 
@@ -1156,11 +1194,6 @@ struct ContentView: View {
         let parts = track.duration.split(separator: ":").compactMap { Double($0) }
         guard parts.count == 2 else { return 0 }
         return parts[0] * 60 + parts[1]
-    }
-
-    private func timeString(_ time: TimeInterval) -> String {
-        let seconds = max(0, Int(time))
-        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 
     private func play(_ track: Track) {

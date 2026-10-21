@@ -334,9 +334,20 @@ final class ConcertPlayback: ObservableObject {
 
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTrackID: UUID?
-    @Published private(set) var currentTime: TimeInterval = 0
-    @Published private(set) var duration: TimeInterval = 0
-    @Published private(set) var audioLevel: Double = 0
+    let metrics = ConcertPlaybackMetrics()
+    var currentTime: TimeInterval {
+        get { metrics.currentTime }
+        set { metrics.currentTime = newValue }
+    }
+    var duration: TimeInterval {
+        get { metrics.duration }
+        set { metrics.duration = newValue }
+    }
+    var audioLevel: Double {
+        get { metrics.audioLevel }
+        set { metrics.audioLevel = newValue }
+    }
+    private var lastAudioLevelUpdate: UInt64 = 0
     @Published var crossfadeDuration: Double = 0
     @Published var autoplayEnabled = false
     @Published var equalizerBandValues = Array(repeating: 0.0, count: 10) {
@@ -432,7 +443,10 @@ final class ConcertPlayback: ObservableObject {
         }
         applyEqualizerSettings()
         audioEngine.mainMixerNode.installTap(onBus: 0, bufferSize: 2_048, format: nil) { [weak self] buffer, _ in
-            guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            guard let self, let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now &- self.lastAudioLevelUpdate >= 100_000_000 else { return }
+            self.lastAudioLevelUpdate = now
             let channelCount = Int(buffer.format.channelCount)
             let frameCount = Int(buffer.frameLength)
             var sum: Float = 0
@@ -443,8 +457,7 @@ final class ConcertPlayback: ObservableObject {
             let rms = sqrt(sum / Float(max(1, channelCount * frameCount)))
             let level = min(1, max(0, (Double(20 * log10(max(rms, 0.000_01))) + 55) / 50))
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.audioLevel = self.audioLevel * 0.6 + level * 0.4
+                self.metrics.audioLevel = self.metrics.audioLevel * 0.6 + level * 0.4
             }
         }
     }
@@ -882,5 +895,11 @@ final class ConcertPlayback: ObservableObject {
             liveActivity = nil
         }
     }
+}
+
+final class ConcertPlaybackMetrics: ObservableObject {
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
+    @Published var audioLevel: Double = 0
 }
 
