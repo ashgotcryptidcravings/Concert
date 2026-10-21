@@ -732,6 +732,7 @@ final class ConcertPlayback: ObservableObject {
             publishSharePlayState()
             return
         }
+        transitioningTrackID = queue[nextIndex].id
         start(queue[nextIndex])
     }
 
