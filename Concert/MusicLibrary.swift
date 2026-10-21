@@ -309,7 +309,29 @@ enum SongLibrary {
     }
 }
 
-final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
+private struct ConcertAudioDeck {
+    let node: AVAudioPlayerNode
+    let equalizer: AVAudioUnitEQ
+    var file: AVAudioFile?
+    var seekOffset: TimeInterval = 0
+    var scheduleGeneration = 0
+
+    var duration: TimeInterval {
+        guard let file else { return 0 }
+        return Double(file.length) / file.processingFormat.sampleRate
+    }
+
+    func currentTime(in engine: AVAudioEngine) -> TimeInterval {
+        guard let file, let nodeTime = node.lastRenderTime,
+              let playerTime = node.playerTime(forNodeTime: nodeTime) else { return seekOffset }
+        let elapsed = Double(playerTime.sampleTime) / file.processingFormat.sampleRate
+        return min(duration, max(0, seekOffset + elapsed))
+    }
+}
+
+final class ConcertPlayback: ObservableObject {
+    static let equalizerFrequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTrackID: UUID?
     @Published private(set) var currentTime: TimeInterval = 0
@@ -317,6 +339,12 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var audioLevel: Double = 0
     @Published var crossfadeDuration: Double = 0
     @Published var autoplayEnabled = false
+    @Published var equalizerBandValues = Array(repeating: 0.0, count: 10) {
+        didSet { applyEqualizerSettings() }
+    }
+    @Published var equalizerPreamp = 0.0 {
+        didSet { applyEqualizerSettings() }
+    }
     @Published private(set) var shuffleEnabled = false
     @Published private(set) var repeatMode: RepeatMode = .off
     @Published private(set) var sharePlayActive = false
@@ -332,8 +360,10 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var applyingSharePlayState = false
     private var lastSharePlaySyncInterval = -1
     private var queueIndex = 0
-    private var player: AVAudioPlayer?
-    private var incomingPlayer: AVAudioPlayer?
+    private let audioEngine = AVAudioEngine()
+    private var decks: [ConcertAudioDeck] = []
+    private var activeDeckIndex: Int?
+    private var incomingDeckIndex: Int?
     private var progressTimer: Timer?
     private var fadeTimer: Timer?
     private var fadeElapsed: Double = 0
@@ -359,10 +389,55 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
     }
 
-    override init() {
-        super.init()
+    init() {
+        configureAudioGraph()
         configureRemoteCommands()
         observeSharePlaySessions()
+    }
+
+    private func configureAudioGraph() {
+        for _ in 0..<2 {
+            let node = AVAudioPlayerNode()
+            let equalizer = AVAudioUnitEQ(numberOfBands: Self.equalizerFrequencies.count)
+            audioEngine.attach(node)
+            audioEngine.attach(equalizer)
+            for (index, band) in equalizer.bands.enumerated() {
+                band.filterType = .parametric
+                band.frequency = Self.equalizerFrequencies[index]
+                band.bandwidth = 1.0
+                band.gain = 0
+                band.bypass = false
+            }
+            audioEngine.connect(node, to: equalizer, format: nil)
+            audioEngine.connect(equalizer, to: audioEngine.mainMixerNode, format: nil)
+            decks.append(ConcertAudioDeck(node: node, equalizer: equalizer))
+        }
+        applyEqualizerSettings()
+        audioEngine.mainMixerNode.installTap(onBus: 0, bufferSize: 2_048, format: nil) { [weak self] buffer, _ in
+            guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            let channelCount = Int(buffer.format.channelCount)
+            let frameCount = Int(buffer.frameLength)
+            var sum: Float = 0
+            for channel in 0..<channelCount {
+                let samples = channels[channel]
+                for frame in 0..<frameCount { sum += samples[frame] * samples[frame] }
+            }
+            let rms = sqrt(sum / Float(max(1, channelCount * frameCount)))
+            let level = min(1, max(0, (Double(20 * log10(max(rms, 0.000_01))) + 55) / 50))
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.audioLevel = self.audioLevel * 0.6 + level * 0.4
+            }
+        }
+    }
+
+    private func applyEqualizerSettings() {
+        for deck in decks {
+            deck.equalizer.globalGain = Float(min(12, max(-12, equalizerPreamp)))
+            for (index, band) in deck.equalizer.bands.enumerated() where index < equalizerBandValues.count {
+                band.gain = Float(min(12, max(-12, equalizerBandValues[index])))
+            }
+        }
     }
 
     func startSharePlay() {
@@ -437,17 +512,17 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func configureRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.addTarget { [weak self] _ in
-            guard let self, self.player != nil else { return .commandFailed }
+            guard let self, self.activeTrack != nil else { return .commandFailed }
             if !self.isPlaying { self.togglePlayback() }
             return .success
         }
         commands.pauseCommand.addTarget { [weak self] _ in
-            guard let self, self.player != nil else { return .commandFailed }
+            guard let self, self.activeTrack != nil else { return .commandFailed }
             if self.isPlaying { self.togglePlayback() }
             return .success
         }
         commands.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self, self.player != nil else { return .commandFailed }
+            guard let self, self.activeTrack != nil else { return .commandFailed }
             self.togglePlayback()
             return .success
         }
@@ -474,28 +549,30 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
         self.queue = shuffleEnabled ? shuffledQueue(queue, keeping: track) : queue
         queueIndex = self.queue.firstIndex(where: { $0.id == track.id }) ?? 0
 
-        // Explicit track selection should take effect immediately. Crossfade is
-        // reserved for automatic transitions near the end of a song.
-        start(track)
+        if isPlaying, activeDeckIndex != nil, currentTrackID != track.id {
+            beginCrossfade(to: queueIndex, duration: 0.22)
+        } else {
+            start(track)
+        }
     }
 
     func togglePlayback() {
-        guard let player else { return }
+        guard let activeDeckIndex else { return }
         if isPlaying {
             progressTimer?.invalidate()
-            player.pause()
-            incomingPlayer?.pause()
+            decks[activeDeckIndex].node.pause()
+            if let incomingDeckIndex { decks[incomingDeckIndex].node.pause() }
             isPlaying = false
             audioLevel = 0
             updateNowPlayingInfo()
             publishSharePlayState()
         } else {
-            if player.currentTime >= player.duration {
-                player.currentTime = 0
-                currentTime = 0
+            if currentTime >= duration {
+                seek(to: 0)
             }
-            player.play()
-            incomingPlayer?.play()
+            startAudioEngineIfNeeded()
+            decks[activeDeckIndex].node.play()
+            if let incomingDeckIndex { decks[incomingDeckIndex].node.play() }
             isPlaying = true
             startProgressTimer()
             updateNowPlayingInfo()
@@ -504,7 +581,7 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func togglePlayback(currentTrack: Track, queue: [Track]) {
-        guard player != nil else {
+        guard activeDeckIndex != nil else {
             play(currentTrack, queue: queue)
             return
         }
@@ -512,15 +589,20 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func seek(to time: TimeInterval) {
-        guard let player else { return }
-        if let incomingPlayer {
+        guard let activeDeckIndex, let activeTrack else { return }
+        if let incomingDeckIndex {
             fadeTimer?.invalidate()
-            incomingPlayer.stop()
-            self.incomingPlayer = nil
-            player.volume = 1
+            decks[incomingDeckIndex].node.stop()
+            decks[incomingDeckIndex].file = nil
+            self.incomingDeckIndex = nil
+            decks[activeDeckIndex].node.volume = 1
         }
-        let target = min(max(0, time), player.duration)
-        player.currentTime = target
+        let target = min(max(0, time), max(0, duration - 0.01))
+        let shouldResume = isPlaying
+        decks[activeDeckIndex].node.stop()
+        guard schedule(activeTrack, on: activeDeckIndex, from: target) else { return }
+        startAudioEngineIfNeeded()
+        if shouldResume { decks[activeDeckIndex].node.play() }
         currentTime = target
         updateNowPlayingInfo()
         publishSharePlayState()
@@ -528,13 +610,22 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func next() {
         guard let nextIndex = nextQueueIndex else { return }
-        start(queue[nextIndex])
+        transition(to: nextIndex)
     }
 
     func previous() {
         guard !queue.isEmpty else { return }
         let previousIndex = max(0, queueIndex - 1)
-        start(queue[previousIndex])
+        transition(to: previousIndex)
+    }
+
+    private func transition(to index: Int) {
+        guard queue.indices.contains(index) else { return }
+        if isPlaying, activeDeckIndex != nil, index != queueIndex {
+            beginCrossfade(to: index, duration: 0.22)
+        } else {
+            start(queue[index])
+        }
     }
 
     func toggleShuffle() {
@@ -569,17 +660,15 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
         return [current] + source.enumerated().filter { $0.offset != index }.map(\.element).shuffled()
     }
 
-    func audioPlayerDidFinishPlaying(_ finishedPlayer: AVAudioPlayer, successfully flag: Bool) {
-        if finishedPlayer === player, incomingPlayer != nil { return }
-        if finishedPlayer === player, repeatMode == .one {
-            player?.currentTime = 0
-            currentTime = 0
-            isPlaying = player?.play() ?? false
-            updateNowPlayingInfo()
-            publishSharePlayState()
+    private func audioDeckDidFinish(_ deckIndex: Int, generation: Int) {
+        guard decks.indices.contains(deckIndex), decks[deckIndex].scheduleGeneration == generation,
+              deckIndex == activeDeckIndex, incomingDeckIndex == nil else { return }
+        if repeatMode == .one {
+            seek(to: 0)
+            if !isPlaying { togglePlayback() }
             return
         }
-        guard finishedPlayer === player, let nextIndex = nextQueueIndex,
+        guard let nextIndex = nextQueueIndex,
               autoplayEnabled || repeatMode == .all || crossfadeDuration > 0 else {
             isPlaying = false
             progressTimer?.invalidate()
@@ -592,42 +681,71 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     private func start(_ track: Track) {
-        guard let url = track.audioURL, let nextPlayer = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard track.audioURL != nil else { return }
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
         try? audioSession.setActive(true)
         progressTimer?.invalidate()
         fadeTimer?.invalidate()
-        incomingPlayer?.stop()
-        incomingPlayer = nil
-        nextPlayer.delegate = self
-        nextPlayer.volume = 1
-        nextPlayer.isMeteringEnabled = true
-        nextPlayer.prepareToPlay()
-        player?.stop()
-        player = nextPlayer
+        for deck in decks { deck.node.stop() }
+        incomingDeckIndex = nil
+        let deckIndex = activeDeckIndex ?? 0
+        guard schedule(track, on: deckIndex, from: 0) else { return }
+        for index in decks.indices where index != deckIndex { decks[index].file = nil }
+        activeDeckIndex = deckIndex
+        decks[deckIndex].node.volume = 1
+        startAudioEngineIfNeeded()
         activeTrack = track
         currentTrackID = track.id
         currentTime = 0
-        duration = nextPlayer.duration
+        duration = decks[deckIndex].duration
         queueIndex = queue.firstIndex(where: { $0.id == track.id }) ?? queueIndex
         lastSharePlaySyncInterval = -1
-        isPlaying = nextPlayer.play()
+        decks[deckIndex].node.play()
+        isPlaying = true
         updateNowPlayingInfo()
         publishSharePlayState()
-        if isPlaying { startProgressTimer() }
+        startProgressTimer()
+    }
+
+    private func schedule(_ track: Track, on deckIndex: Int, from time: TimeInterval) -> Bool {
+        guard decks.indices.contains(deckIndex), let url = track.audioURL,
+              let file = try? AVAudioFile(forReading: url) else { return false }
+        let sampleRate = file.processingFormat.sampleRate
+        let startFrame = AVAudioFramePosition(min(Double(file.length), max(0, time * sampleRate)))
+        let remainingFrames = file.length - startFrame
+        guard remainingFrames > 0 else { return false }
+        decks[deckIndex].scheduleGeneration += 1
+        let generation = decks[deckIndex].scheduleGeneration
+        decks[deckIndex].file = file
+        decks[deckIndex].seekOffset = Double(startFrame) / sampleRate
+        decks[deckIndex].node.scheduleSegment(
+            file,
+            startingFrame: startFrame,
+            frameCount: AVAudioFrameCount(remainingFrames),
+            at: nil,
+            completionCallbackType: .dataPlayedBack
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.audioDeckDidFinish(deckIndex, generation: generation) }
+        }
+        return true
+    }
+
+    private func startAudioEngineIfNeeded() {
+        guard !audioEngine.isRunning else { return }
+        do {
+            try audioEngine.start()
+        } catch {
+            NSLog("Concert audio engine failed to start: %@", error.localizedDescription)
+        }
     }
 
     private func startProgressTimer() {
         progressTimer?.invalidate()
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, self.isPlaying, let player = self.player else { return }
-            self.currentTime = player.currentTime
-            self.duration = player.duration
-            player.updateMeters()
-            let decibels = Double(player.averagePower(forChannel: 0))
-            let measuredLevel = min(1, max(0, (decibels + 55) / 50))
-            self.audioLevel = self.audioLevel * 0.58 + measuredLevel * 0.42
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self, self.isPlaying, let activeDeckIndex = self.activeDeckIndex else { return }
+            self.currentTime = self.decks[activeDeckIndex].currentTime(in: self.audioEngine)
+            self.duration = self.decks[activeDeckIndex].duration
             if self.groupMessenger != nil {
                 let syncInterval = Int(self.currentTime / 10)
                 if syncInterval != self.lastSharePlaySyncInterval {
@@ -635,48 +753,55 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
                     self.publishSharePlayState()
                 }
             }
-            guard self.incomingPlayer == nil,
+            guard self.incomingDeckIndex == nil,
                   self.crossfadeDuration > 0, let nextIndex = self.nextQueueIndex, nextIndex != self.queueIndex,
-                  player.duration - player.currentTime <= self.crossfadeDuration else { return }
-            self.beginCrossfade(to: nextIndex, duration: max(0.1, player.duration - player.currentTime))
+                  self.duration - self.currentTime <= self.crossfadeDuration else { return }
+            self.beginCrossfade(to: nextIndex, duration: max(0.1, self.duration - self.currentTime))
         }
     }
 
     private func beginCrossfade(to index: Int, duration: Double) {
-        guard index < queue.count, let url = queue[index].audioURL,
-              let nextPlayer = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard queue.indices.contains(index), let activeDeckIndex,
+              queue[index].audioURL != nil else { return }
         fadeTimer?.invalidate()
-        if incomingPlayer != nil {
-            incomingPlayer?.stop()
-            player?.volume = 1
+        if let incomingDeckIndex {
+            decks[incomingDeckIndex].node.stop()
+            decks[incomingDeckIndex].file = nil
+            self.incomingDeckIndex = nil
+            decks[activeDeckIndex].node.volume = 1
         }
-        let outgoingRemaining = max(0.1, (player?.duration ?? duration) - (player?.currentTime ?? 0))
-        let fadeDuration = max(0.1, min(duration, outgoingRemaining, nextPlayer.duration))
-        nextPlayer.delegate = self
-        nextPlayer.isMeteringEnabled = true
-        nextPlayer.volume = 0
-        nextPlayer.prepareToPlay()
-        incomingPlayer = nextPlayer
+        let incomingDeckIndex = 1 - activeDeckIndex
+        guard schedule(queue[index], on: incomingDeckIndex, from: 0) else { return }
+        let incomingDuration = decks[incomingDeckIndex].duration
+        let outgoingRemaining = max(0.1, self.duration - currentTime)
+        let fadeDuration = max(0.1, min(duration, outgoingRemaining, incomingDuration))
+        decks[incomingDeckIndex].node.volume = 0
+        self.incomingDeckIndex = incomingDeckIndex
+        startAudioEngineIfNeeded()
         fadeElapsed = 0
-        nextPlayer.play()
-        fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
-            guard let self, let outgoing = self.player, let incoming = self.incomingPlayer else {
+        decks[incomingDeckIndex].node.play()
+        fadeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] timer in
+            guard let self, let activeDeckIndex = self.activeDeckIndex,
+                  let incomingDeckIndex = self.incomingDeckIndex else {
                 timer.invalidate()
                 return
             }
-            self.fadeElapsed += 0.1
+            self.fadeElapsed += 1.0 / 30.0
             let progress = min(1, self.fadeElapsed / fadeDuration)
-            outgoing.volume = Float(1 - progress)
-            incoming.volume = Float(progress)
+            let fadeAngle = progress * .pi / 2
+            self.decks[activeDeckIndex].node.volume = Float(cos(fadeAngle))
+            self.decks[incomingDeckIndex].node.volume = Float(sin(fadeAngle))
             if progress >= 1 {
                 timer.invalidate()
-                outgoing.stop()
-                self.player = incoming
-                self.incomingPlayer = nil
+                self.decks[activeDeckIndex].node.stop()
+                self.decks[activeDeckIndex].file = nil
+                self.decks[incomingDeckIndex].node.volume = 1
+                self.activeDeckIndex = incomingDeckIndex
+                self.incomingDeckIndex = nil
                 self.queueIndex = index
                 self.currentTrackID = self.queue[index].id
-                self.currentTime = incoming.currentTime
-                self.duration = incoming.duration
+                self.currentTime = self.decks[incomingDeckIndex].currentTime(in: self.audioEngine)
+                self.duration = self.decks[incomingDeckIndex].duration
                 self.activeTrack = self.queue[index]
                 self.updateNowPlayingInfo()
                 self.publishSharePlayState()

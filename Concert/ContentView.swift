@@ -22,6 +22,23 @@ private enum ConcertTab: String, CaseIterable {
     }
 }
 
+private let equalizerPresets: [String: [Double]] = [
+    "Flat":              [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "Acoustic":           [4, 3, 2, 1, 1, 2, 3, 3, 2, 2],
+    "Bass Booster":       [8, 7, 6, 4, 2, 0, 0, 0, 1, 1],
+    "Bass Reducer":       [-7, -6, -4, -2, 0, 1, 2, 2, 2, 2],
+    "Classical":          [4, 3, 2, 1, -1, -2, 0, 2, 3, 4],
+    "Dance":              [5, 4, 1, 0, 1, 3, 4, 3, 1, 0],
+    "Electronic":         [5, 4, 2, 0, -1, 2, 1, 2, 4, 5],
+    "Hip-Hop":            [6, 5, 2, 3, -1, -1, 1, 2, 3, 3],
+    "Jazz":               [4, 3, 1, 2, -2, -2, 0, 2, 4, 5],
+    "Late Night":         [3, 2, 1, 0, 1, 2, 3, 2, 1, 0],
+    "Pop":                [-1, 1, 3, 4, 2, 0, -1, -1, 1, 2],
+    "R&B":                [4, 3, 1, 2, -1, 0, 1, 2, 3, 4],
+    "Rock":               [5, 4, 3, 1, -1, 1, 3, 4, 4, 4],
+    "Vocal Booster":      [-2, -1, 0, 2, 4, 4, 3, 2, 1, 0]
+]
+
 private enum AlbumSheet: Identifiable {
     case all
     case detail(AlbumCollection)
@@ -69,10 +86,13 @@ struct ContentView: View {
     @State private var isLoadingLibrary = true
     @State private var showingPlayer = false
     @State private var playerDetent: PresentationDetent = .medium
+    @State private var isSeeking = false
+    @State private var seekPreviewProgress: Double = 0
     @State private var showingSettings = false
     @State private var albumSheet: AlbumSheet?
     @State private var searchText = ""
     @State private var audioQuality = "All qualities"
+    @State private var equalizerPreset = "Flat"
     @State private var playerBackground = Color(uiColor: .systemGroupedBackground)
     @StateObject private var playback = ConcertPlayback()
 
@@ -157,7 +177,9 @@ struct ContentView: View {
                 .presentationDragIndicator(.visible)
         }
         .onReceive(playback.$currentTrackID.compactMap { $0 }) { trackID in
-            if let track = tracks.first(where: { $0.id == trackID }) { currentTrack = track }
+            if let track = libraryTracks.first(where: { $0.id == trackID }) {
+                withAnimation(.easeInOut(duration: 0.28)) { currentTrack = track }
+            }
         }
         .onChange(of: currentTrack.id) { _ in
             withAnimation(.easeInOut(duration: 0.8)) {
@@ -170,6 +192,12 @@ struct ContentView: View {
         .onChange(of: audioQuality) { _ in persistSettings() }
         .onChange(of: playback.crossfadeDuration) { _ in persistSettings() }
         .onChange(of: playback.autoplayEnabled) { _ in persistSettings() }
+        .onChange(of: equalizerPreset) { preset in
+            if let bands = equalizerPresets[preset] { playback.equalizerBandValues = bands }
+            persistSettings()
+        }
+        .onChange(of: playback.equalizerBandValues) { _ in persistSettings() }
+        .onChange(of: playback.equalizerPreamp) { _ in persistSettings() }
     }
 
     private var discoverView: some View {
@@ -361,6 +389,60 @@ struct ContentView: View {
                             Text("Spatial").tag("Full Spatial Lossless")
                         }
                         .pickerStyle(.segmented)
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                Label("Equalizer", systemImage: "slider.vertical.3")
+                                    .font(.system(size: 15, weight: .medium))
+                                Spacer()
+                                Picker("Equalizer preset", selection: $equalizerPreset) {
+                                    ForEach(equalizerPresets.keys.sorted(), id: \.self) { preset in
+                                        Text(preset).tag(preset)
+                                    }
+                                    Text("Custom").tag("Custom")
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                            }
+                            HStack(alignment: .center, spacing: 2) {
+                                ForEach(ConcertPlayback.equalizerFrequencies.indices, id: \.self) { index in
+                                    VStack(spacing: 7) {
+                                        Text(equalizerBandLabel(index))
+                                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.7)
+                                        Slider(value: equalizerBandBinding(index), in: -12...12)
+                                            .rotationEffect(.degrees(-90))
+                                            .frame(width: 94, height: 22)
+                                            .frame(width: 26, height: 94)
+                                        Text(String(format: "%+.0f", playback.equalizerBandValues[index]))
+                                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                            .frame(height: 11)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            HStack {
+                                Text("10 bands · ±12 dB")
+                                    .font(.caption).foregroundColor(.secondary)
+                                Spacer()
+                                Button("Reset") { resetEqualizer() }
+                                    .font(.caption.weight(.semibold))
+                            }
+                            VStack(spacing: 4) {
+                                HStack {
+                                    Text("Preamp").font(.caption.weight(.medium))
+                                    Spacer()
+                                    Text(String(format: "%+.0f dB", playback.equalizerPreamp))
+                                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                                }
+                                Slider(value: $playback.equalizerPreamp, in: -12...12)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Crossfade").font(.system(size: 15, weight: .medium))
@@ -426,6 +508,16 @@ struct ContentView: View {
             audioQuality = settings.value(forKey: "audioQuality") as? String ?? "All qualities"
             playback.crossfadeDuration = settings.value(forKey: "crossfadeDuration") as? Double ?? 0
             playback.autoplayEnabled = settings.value(forKey: "autoplayEnabled") as? Bool ?? false
+            playback.equalizerPreamp = settings.value(forKey: "equalizerPreamp") as? Double ?? 0
+            equalizerPreset = settings.value(forKey: "equalizerPreset") as? String ?? "Flat"
+            if let savedBands = settings.value(forKey: "equalizerBandValues") as? String {
+                let values = savedBands.split(separator: ",").compactMap { Double($0) }
+                if values.count == ConcertPlayback.equalizerFrequencies.count {
+                    playback.equalizerBandValues = values
+                }
+            } else if let presetBands = equalizerPresets[equalizerPreset] {
+                playback.equalizerBandValues = presetBands
+            }
         }
         settingsLoaded = true
     }
@@ -440,6 +532,9 @@ struct ContentView: View {
         record.setValue(audioQuality, forKey: "audioQuality")
         record.setValue(playback.crossfadeDuration, forKey: "crossfadeDuration")
         record.setValue(playback.autoplayEnabled, forKey: "autoplayEnabled")
+        record.setValue(equalizerPreset, forKey: "equalizerPreset")
+        record.setValue(playback.equalizerBandValues.map { String(format: "%.2f", $0) }.joined(separator: ","), forKey: "equalizerBandValues")
+        record.setValue(playback.equalizerPreamp, forKey: "equalizerPreamp")
         record.setValue(Date(), forKey: "updatedAt")
         saveContext()
     }
@@ -476,6 +571,31 @@ struct ContentView: View {
         catch { NSLog("Concert Core Data save failed: %@", error.localizedDescription) }
     }
 
+    private func equalizerBandBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: { playback.equalizerBandValues[index] },
+            set: { value in
+                equalizerPreset = "Custom"
+                playback.equalizerBandValues[index] = value
+            }
+        )
+    }
+
+    private func equalizerBandLabel(_ index: Int) -> String {
+        ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"][index]
+    }
+
+    private func selectEqualizerPreset(_ preset: String) {
+        guard let bands = equalizerPresets[preset] else { return }
+        equalizerPreset = preset
+        playback.equalizerBandValues = bands
+    }
+
+    private func resetEqualizer() {
+        selectEqualizerPreset("Flat")
+        playback.equalizerPreamp = 0
+    }
+
     private var nowPlayingBar: some View {
         HStack(spacing: 12) {
             if isLoadingLibrary {
@@ -491,9 +611,12 @@ struct ContentView: View {
                 Button { showingPlayer = true } label: {
                     HStack(spacing: 12) {
                         artwork(currentTrack, size: 44)
+                            .id(currentTrack.id)
+                            .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                            .animation(.easeInOut(duration: 0.28), value: currentTrack.id)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(currentTrack.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary).lineLimit(1)
-                            Text(currentTrack.artist).font(.system(size: 12)).foregroundColor(.secondary).lineLimit(1)
+                            Text(currentTrack.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary).lineLimit(1).contentTransition(.opacity)
+                            Text(currentTrack.artist).font(.system(size: 12)).foregroundColor(.secondary).lineLimit(1).contentTransition(.opacity)
                         }
                     }
                     .foregroundColor(.primary)
@@ -535,17 +658,20 @@ struct ContentView: View {
 
     private var fullPlayer: some View {
         GeometryReader { geometry in
-            let compactLayout = geometry.size.height < 500
-            let artworkSize = min(geometry.size.width * 0.62, max(compactLayout ? 96 : 150, geometry.size.height * (compactLayout ? 0.31 : 0.30)))
+            let expansion = min(1, max(0, (geometry.size.height - 360) / 440))
+            let artworkSize = min(geometry.size.width * 0.68, max(132, geometry.size.height * (0.36 + expansion * 0.05)))
             ZStack {
                 ScrollView(showsIndicators: false) {
-                VStack(spacing: compactLayout ? 10 : 18) {
+                VStack(spacing: 10 + expansion * 8) {
                     artwork(currentTrack, size: artworkSize)
+                        .id(currentTrack.id)
+                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                        .animation(.easeInOut(duration: 0.3), value: currentTrack.id)
                         .shadow(color: playerBackground.opacity(0.45), radius: 24, y: 14)
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(currentTrack.title).font(.system(size: 23, weight: .bold, design: .rounded)).lineLimit(1)
-                            Text(currentTrack.artist).font(.system(size: 16)).foregroundColor(.secondary).lineLimit(1)
+                            Text(currentTrack.title).font(.system(size: 23, weight: .bold, design: .rounded)).lineLimit(1).contentTransition(.opacity)
+                            Text(currentTrack.artist).font(.system(size: 16)).foregroundColor(.secondary).lineLimit(1).contentTransition(.opacity)
                         }
                         Spacer()
                         Button { toggleFavorite(currentTrack) } label: {
@@ -555,7 +681,8 @@ struct ContentView: View {
                     }
                     VStack(spacing: 4) {
                         GeometryReader { proxy in
-                            let progress = min(1, max(0, playback.currentTime / max(playback.duration, 1)))
+                            let liveProgress = min(1, max(0, playback.currentTime / max(playback.duration, 1)))
+                            let progress = isSeeking ? seekPreviewProgress : liveProgress
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
                                 Capsule().fill(Color.primary).frame(width: max(4, proxy.size.width * progress), height: 4)
@@ -565,9 +692,16 @@ struct ContentView: View {
                             }
                             .frame(maxHeight: .infinity)
                             .contentShape(Rectangle())
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                                playback.seek(to: max(0, min(1, value.location.x / max(proxy.size.width, 1))) * max(playback.duration, 0))
-                            })
+                            .gesture(DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    isSeeking = true
+                                    seekPreviewProgress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
+                                }
+                                .onEnded { value in
+                                    let progress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
+                                    playback.seek(to: progress * max(playback.duration, 0))
+                                    isSeeking = false
+                                })
                         }
                         .frame(height: 30)
                         .accessibilityElement()
@@ -580,7 +714,7 @@ struct ContentView: View {
                         }
                         .font(.caption2).foregroundColor(.secondary)
                     }
-                    HStack(spacing: compactLayout ? 22 : 38) {
+                    HStack(spacing: 18 + expansion * 20) {
                         Button { playback.toggleShuffle() } label: {
                             Image(systemName: "shuffle").font(.system(size: 19))
                                 .foregroundColor(playback.shuffleEnabled ? .accentColor : .secondary)
@@ -589,7 +723,7 @@ struct ContentView: View {
                         .accessibilityLabel(playback.shuffleEnabled ? "Turn shuffle off" : "Turn shuffle on")
                         Button { playback.previous() } label: { Image(systemName: "backward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
                         Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
-                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: compactLayout ? 52 : 62))
+                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: 52 + expansion * 10))
                         }.buttonStyle(.plain)
                         Button { playback.next() } label: { Image(systemName: "forward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
                         Button { playback.cycleRepeatMode() } label: {
@@ -600,8 +734,7 @@ struct ContentView: View {
                         .accessibilityLabel(repeatAccessibilityLabel)
                     }
                     .padding(.top, 3)
-                    if !compactLayout {
-                        VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
                             Text("UP NEXT")
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                                 .tracking(1.2)
@@ -619,9 +752,8 @@ struct ContentView: View {
                                     trackRow(track, queue: playback.currentQueue)
                                 }
                             }
-                        }
-                        .padding(.top, 12)
                     }
+                    .padding(.top, 12)
                     Spacer(minLength: 12)
                 }
                 .padding(.horizontal, 28)
@@ -855,7 +987,35 @@ struct ContentView: View {
             .padding(20)
             .padding(.bottom, 20)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background {
+            albumAtmosphere(for: album).ignoresSafeArea()
+        }
+    }
+
+    private func albumAtmosphere(for album: AlbumCollection) -> some View {
+        let color = artworkColor(for: album.artworkTrack)
+        return GeometryReader { geometry in
+            ZStack {
+                Color(uiColor: .systemGroupedBackground)
+                LinearGradient(
+                    colors: [color.opacity(colorScheme == .dark ? 0.30 : 0.44), color.opacity(0.18), Color(uiColor: .systemGroupedBackground)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Circle()
+                    .fill(color.opacity(colorScheme == .dark ? 0.20 : 0.14))
+                    .frame(width: geometry.size.width * 1.25)
+                    .blur(radius: 72)
+                    .offset(x: geometry.size.width * 0.24, y: -geometry.size.height * 0.28)
+                Circle()
+                    .fill(color.opacity(colorScheme == .dark ? 0.13 : 0.10))
+                    .frame(width: geometry.size.width * 0.9)
+                    .blur(radius: 64)
+                    .offset(x: -geometry.size.width * 0.22, y: geometry.size.height * 0.38)
+            }
+            .animation(.easeInOut(duration: 0.8), value: album.id)
+            .allowsHitTesting(false)
+        }
     }
 
     private func trackRow(_ track: Track, showFavorite: Bool = false, queue: [Track]? = nil) -> some View {
@@ -888,6 +1048,7 @@ struct ContentView: View {
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .background(isCurrentTrack ? Color.accentColor.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(.easeInOut(duration: 0.24), value: isCurrentTrack)
     }
 
     private func artwork(_ track: Track, size: CGFloat) -> some View {
@@ -953,7 +1114,7 @@ struct ContentView: View {
     }
 
     private func play(_ track: Track, queue: [Track]) {
-        currentTrack = track
+        withAnimation(.easeInOut(duration: 0.28)) { currentTrack = track }
         playback.play(track, queue: queue)
     }
 

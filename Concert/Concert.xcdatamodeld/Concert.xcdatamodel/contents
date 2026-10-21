@@ -23,6 +23,9 @@
         <attribute name="audioQuality" optional="YES" attributeType="String"/>
         <attribute name="autoplayEnabled" optional="YES" attributeType="Boolean" usesScalarValueType="NO"/>
         <attribute name="crossfadeDuration" optional="YES" attributeType="Double" usesScalarValueType="NO"/>
+        <attribute name="equalizerPreset" optional="YES" attributeType="String"/>
+        <attribute name="equalizerBandValues" optional="YES" attributeType="String"/>
+        <attribute name="equalizerPreamp" optional="YES" attributeType="Double" usesScalarValueType="NO"/>
         <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
     </entity>
     <entity name="LibraryTrackRecord" representedClassName="LibraryTrackRecord" syncable="YES" codeGenerationType="class">
