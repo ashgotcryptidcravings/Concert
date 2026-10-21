@@ -79,6 +79,9 @@ struct ContentView: View {
     @State private var selectedTab: ConcertTab = .discover
     @State private var libraryTracks: [Track]
     @State private var currentTrack: Track
+    @State private var previousArtworkTrack: Track?
+    @State private var artworkTransitionProgress = 1.0
+    @State private var artworkTransitionToken = UUID()
     @State private var favorites: Set<String> = []
     @State private var noteworthyKeys: [String] = []
     @State private var showingNoteworthy = false
@@ -158,7 +161,7 @@ struct ContentView: View {
             libraryTracks = loadedTracks
             playback.updateLibrary(loadedTracks)
             noteworthyKeys = recordAndOrderNewTracks(loadedTracks)
-            if let firstTrack = loadedTracks.first { currentTrack = firstTrack }
+            if let firstTrack = loadedTracks.first { transitionTo(firstTrack) }
             isLoadingLibrary = false
         }
         .sheet(isPresented: $showingPlayer) {
@@ -178,7 +181,7 @@ struct ContentView: View {
         }
         .onReceive(playback.$currentTrackID.compactMap { $0 }) { trackID in
             if let track = libraryTracks.first(where: { $0.id == trackID }) {
-                withAnimation(.easeInOut(duration: 0.28)) { currentTrack = track }
+                transitionTo(track)
             }
         }
         .onChange(of: currentTrack.id) { _ in
@@ -610,13 +613,10 @@ struct ContentView: View {
             } else {
                 Button { showingPlayer = true } label: {
                     HStack(spacing: 12) {
-                        artwork(currentTrack, size: 44)
-                            .id(currentTrack.id)
-                            .transition(.opacity.combined(with: .scale(scale: 0.94)))
-                            .animation(.easeInOut(duration: 0.28), value: currentTrack.id)
+                        transitioningArtwork(currentTrack, size: 44)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(currentTrack.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary).lineLimit(1).contentTransition(.opacity)
-                            Text(currentTrack.artist).font(.system(size: 12)).foregroundColor(.secondary).lineLimit(1).contentTransition(.opacity)
+                            transitioningTrackLabel(currentTrack.title, previous: previousArtworkTrack?.title, font: .system(size: 14, weight: .semibold), color: .primary)
+                            transitioningTrackLabel(currentTrack.artist, previous: previousArtworkTrack?.artist, font: .system(size: 12), color: .secondary)
                         }
                     }
                     .foregroundColor(.primary)
@@ -663,15 +663,12 @@ struct ContentView: View {
             ZStack {
                 ScrollView(showsIndicators: false) {
                 VStack(spacing: 10 + expansion * 8) {
-                    artwork(currentTrack, size: artworkSize)
-                        .id(currentTrack.id)
-                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
-                        .animation(.easeInOut(duration: 0.3), value: currentTrack.id)
+                    transitioningArtwork(currentTrack, size: artworkSize)
                         .shadow(color: playerBackground.opacity(0.45), radius: 24, y: 14)
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(currentTrack.title).font(.system(size: 23, weight: .bold, design: .rounded)).lineLimit(1).contentTransition(.opacity)
-                            Text(currentTrack.artist).font(.system(size: 16)).foregroundColor(.secondary).lineLimit(1).contentTransition(.opacity)
+                            transitioningTrackLabel(currentTrack.title, previous: previousArtworkTrack?.title, font: .system(size: 23, weight: .bold, design: .rounded), color: .primary)
+                            transitioningTrackLabel(currentTrack.artist, previous: previousArtworkTrack?.artist, font: .system(size: 16), color: .secondary)
                         }
                         Spacer()
                         Button { toggleFavorite(currentTrack) } label: {
@@ -1069,6 +1066,40 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: size * 0.13, style: .continuous))
     }
 
+    private func transitioningArtwork(_ track: Track, size: CGFloat) -> some View {
+        ZStack {
+            if let previousArtworkTrack, previousArtworkTrack.id != track.id {
+                artwork(previousArtworkTrack, size: size)
+                    .opacity(1 - artworkTransitionProgress)
+                    .accessibilityHidden(true)
+            }
+            artwork(track, size: size)
+                .opacity(artworkTransitionProgress)
+        }
+        .frame(width: size, height: size)
+        .clipped()
+    }
+
+    private func transitioningTrackLabel(_ text: String, previous: String?, font: Font, color: Color) -> some View {
+        ZStack(alignment: .leading) {
+            if let previous, previous != text {
+                Text(previous)
+                    .font(font)
+                    .foregroundColor(color)
+                    .lineLimit(1)
+                    .opacity(1 - artworkTransitionProgress)
+                    .accessibilityHidden(true)
+            }
+            Text(text)
+                .font(font)
+                .foregroundColor(color)
+                .lineLimit(1)
+                .opacity(artworkTransitionProgress)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
+    }
+
     private func artworkColor(for track: Track) -> Color {
         let image: UIImage?
         if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
@@ -1114,8 +1145,27 @@ struct ContentView: View {
     }
 
     private func play(_ track: Track, queue: [Track]) {
-        withAnimation(.easeInOut(duration: 0.28)) { currentTrack = track }
+        transitionTo(track)
         playback.play(track, queue: queue)
+    }
+
+    private func transitionTo(_ track: Track) {
+        guard currentTrack.id != track.id else { return }
+        let token = UUID()
+        artworkTransitionToken = token
+        previousArtworkTrack = currentTrack
+        artworkTransitionProgress = 0
+        currentTrack = track
+        DispatchQueue.main.async {
+            guard artworkTransitionToken == token else { return }
+            withAnimation(.easeInOut(duration: 0.44)) {
+                artworkTransitionProgress = 1
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
+            guard artworkTransitionToken == token else { return }
+            previousArtworkTrack = nil
+        }
     }
 
     private func toggleFavorite(_ track: Track) {
