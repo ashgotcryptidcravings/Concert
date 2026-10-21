@@ -132,59 +132,58 @@ private struct PlayerAtmosphere: View {
     let colorScheme: ColorScheme
 
     var body: some View {
-        GeometryReader { backgroundGeometry in
-            let audioPulse = CGFloat(metrics.audioLevel)
-            let darkMode = colorScheme == .dark
-            ZStack {
-                Color(uiColor: .systemGroupedBackground)
-                LinearGradient(
-                    colors: [
-                        playerBackground.opacity(darkMode ? 0.28 : 0.48),
-                        playerBackground.opacity(darkMode ? 0.12 : 0.20),
-                        Color(uiColor: .systemGroupedBackground)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                Circle()
-                    .fill(playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.24 : 0.18) + metrics.audioLevel * 0.34 : 0.08))
-                    .frame(width: backgroundGeometry.size.width * 1.25)
-                    .blur(radius: 76)
-                    .scaleEffect(playback.isPlaying ? 0.94 + audioPulse * 0.46 : 0.88)
-                    .offset(
-                        x: (playback.isPlaying ? backgroundGeometry.size.width * 0.20 : -backgroundGeometry.size.width * 0.22) + backgroundGeometry.size.width * audioPulse * 0.18,
-                        y: (playback.isPlaying ? -backgroundGeometry.size.height * 0.24 : -backgroundGeometry.size.height * 0.12) - backgroundGeometry.size.height * audioPulse * 0.07
-                    )
-                Circle()
-                    .fill(playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.16 : 0.10) + metrics.audioLevel * 0.30 : 0.06))
-                    .frame(width: backgroundGeometry.size.width * 0.94)
-                    .blur(radius: 68)
-                    .scaleEffect(playback.isPlaying ? 1.05 - audioPulse * 0.32 : 1.08)
-                    .offset(
-                        x: (playback.isPlaying ? -backgroundGeometry.size.width * 0.20 : backgroundGeometry.size.width * 0.20) - backgroundGeometry.size.width * audioPulse * 0.16,
-                        y: (playback.isPlaying ? backgroundGeometry.size.height * 0.32 : backgroundGeometry.size.height * 0.42) + backgroundGeometry.size.height * audioPulse * 0.08
-                    )
-                Circle()
-                    .fill(Color.accentColor.opacity(playback.isPlaying ? 0.08 + metrics.audioLevel * 0.24 : 0.035))
-                    .frame(width: backgroundGeometry.size.width * 0.68)
-                    .blur(radius: 54)
-                    .scaleEffect(playback.isPlaying ? 0.72 + audioPulse * 0.70 : 0.8)
-                    .offset(
-                        x: (playback.isPlaying ? -backgroundGeometry.size.width * 0.12 : backgroundGeometry.size.width * 0.16) + backgroundGeometry.size.width * audioPulse * 0.22,
-                        y: (playback.isPlaying ? -backgroundGeometry.size.height * 0.02 : backgroundGeometry.size.height * 0.08) - backgroundGeometry.size.height * audioPulse * 0.18
-                    )
-            }
-            .allowsHitTesting(false)
-            .animation(
-                playback.isPlaying
-                    ? Animation.easeInOut(duration: 9).repeatForever(autoreverses: true)
-                    : Animation.easeOut(duration: 0.7),
-                value: playback.isPlaying
+        let audioPulse = CGFloat(metrics.audioLevel)
+        let darkMode = colorScheme == .dark
+        ZStack {
+            Color(uiColor: .systemGroupedBackground)
+            LinearGradient(
+                colors: [
+                    playerBackground.opacity(darkMode ? 0.28 : 0.48),
+                    playerBackground.opacity(darkMode ? 0.12 : 0.20),
+                    Color(uiColor: .systemGroupedBackground)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
             )
-            .animation(.linear(duration: 0.1), value: metrics.audioLevel)
-            .animation(.easeInOut(duration: 0.8), value: playerBackground)
-            .animation(.easeInOut(duration: 0.5), value: colorScheme)
+            RadialGradient(
+                colors: [playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.42 : 0.32) + metrics.audioLevel * 0.16 : 0.10), .clear],
+                center: .center,
+                startRadius: 0,
+                endRadius: 340
+            )
+            .frame(width: 680, height: 680)
+            .scaleEffect(playback.isPlaying ? 0.94 + audioPulse * 0.16 : 0.9)
+            .offset(x: 130, y: -260)
+            RadialGradient(
+                colors: [playerBackground.opacity(playback.isPlaying ? (darkMode ? 0.30 : 0.22) + metrics.audioLevel * 0.12 : 0.07), .clear],
+                center: .center,
+                startRadius: 0,
+                endRadius: 300
+            )
+            .frame(width: 600, height: 600)
+            .scaleEffect(playback.isPlaying ? 1.04 - audioPulse * 0.12 : 1.0)
+            .offset(x: -150, y: 330)
+            RadialGradient(
+                colors: [Color.accentColor.opacity(playback.isPlaying ? 0.08 + metrics.audioLevel * 0.12 : 0.035), .clear],
+                center: .center,
+                startRadius: 0,
+                endRadius: 230
+            )
+            .frame(width: 460, height: 460)
+            .scaleEffect(playback.isPlaying ? 0.82 + audioPulse * 0.18 : 0.86)
+            .offset(x: -120, y: -20)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .animation(
+            playback.isPlaying
+                ? Animation.easeInOut(duration: 9).repeatForever(autoreverses: true)
+                : Animation.easeOut(duration: 0.7),
+            value: playback.isPlaying
+        )
+        .animation(.linear(duration: 0.1), value: metrics.audioLevel)
+        .animation(.easeInOut(duration: 0.8), value: playerBackground)
+        .animation(.easeInOut(duration: 0.5), value: colorScheme)
     }
 }
 
@@ -306,6 +305,33 @@ private let loadingTrack = Track(
     tint: Color(uiColor: .tertiarySystemFill),
     quality: ""
 )
+
+private enum ArtworkImageCache {
+    private static let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 32 * 1024 * 1024
+        return cache
+    }()
+
+    static func image(for track: Track) -> UIImage? {
+        let key = (track.artworkURL?.path ?? "embedded-\(track.id.uuidString)") as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+
+        let image: UIImage?
+        if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
+            image = fileImage
+        } else if let artworkData = track.artworkData {
+            image = UIImage(data: artworkData)
+        } else {
+            image = nil
+        }
+        if let image {
+            let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
+            cache.setObject(image, forKey: key, cost: cost)
+        }
+        return image
+    }
+}
 
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var viewContext
@@ -807,13 +833,13 @@ struct ContentView: View {
 
     private var fullPlayer: some View {
         GeometryReader { geometry in
-            let expansion = min(1, max(0, (geometry.size.height - 360) / 440))
-            let artworkSize = min(geometry.size.width * 0.68, max(132, geometry.size.height * (0.36 + expansion * 0.05)))
+            let artworkSize = min(geometry.size.width * 0.68, playerDetent == .large ? 280 : 156)
             ZStack {
                 ScrollView(showsIndicators: false) {
-                VStack(spacing: 10 + expansion * 8) {
+                VStack(spacing: 16) {
                     transitioningArtwork(currentTrack, size: artworkSize)
                         .shadow(color: playerBackground.opacity(0.45), radius: 24, y: 14)
+                        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: playerDetent)
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             transitioningTrackLabel(currentTrack.title, previous: previousArtworkTrack?.title, font: .system(size: 23, weight: .bold, design: .rounded), color: .primary)
@@ -826,7 +852,7 @@ struct ContentView: View {
                         }.buttonStyle(.plain)
                     }
                     PlaybackSeekBar(metrics: playback.metrics, playback: playback, fallbackDuration: duration(for: currentTrack))
-                    HStack(spacing: 18 + expansion * 20) {
+                    HStack(spacing: 24) {
                         Button { playback.toggleShuffle() } label: {
                             Image(systemName: "shuffle").font(.system(size: 19))
                                 .foregroundColor(playback.shuffleEnabled ? .accentColor : .secondary)
@@ -835,7 +861,7 @@ struct ContentView: View {
                         .accessibilityLabel(playback.shuffleEnabled ? "Turn shuffle off" : "Turn shuffle on")
                         Button { playback.previous() } label: { Image(systemName: "backward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
                         Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
-                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: 52 + expansion * 10))
+                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: 58))
                         }.buttonStyle(.plain)
                         Button { playback.next() } label: { Image(systemName: "forward.end.fill").font(.system(size: 26)) }.buttonStyle(.plain)
                         Button { playback.cycleRepeatMode() } label: {
@@ -1140,12 +1166,7 @@ struct ContentView: View {
             LinearGradient(colors: [track.tint, track.tint.opacity(0.62)], startPoint: .topLeading, endPoint: .bottomTrailing)
             Circle().stroke(Color.white.opacity(0.18), lineWidth: size * 0.06).frame(width: size * 0.7, height: size * 0.7)
             Image(systemName: track.artwork).font(.system(size: size * 0.31, weight: .light)).foregroundColor(.white.opacity(0.9))
-            let coverImage: UIImage? = {
-                if let artworkURL = track.artworkURL, let image = UIImage(contentsOfFile: artworkURL.path) { return image }
-                if let artworkData = track.artworkData { return UIImage(data: artworkData) }
-                return nil
-            }()
-            if let coverImage {
+            if let coverImage = ArtworkImageCache.image(for: track) {
                 Image(uiImage: coverImage).resizable().scaledToFill().frame(width: size, height: size).clipped()
             }
         }
@@ -1190,14 +1211,7 @@ struct ContentView: View {
     }
 
     private func artworkColor(for track: Track) -> Color {
-        let image: UIImage?
-        if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
-            image = fileImage
-        } else if let artworkData = track.artworkData {
-            image = UIImage(data: artworkData)
-        } else {
-            image = nil
-        }
+        let image = ArtworkImageCache.image(for: track)
         guard let cgImage = image?.cgImage else { return track.tint }
 
         var pixel = [UInt8](repeating: 0, count: 4)
