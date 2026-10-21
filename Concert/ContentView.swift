@@ -85,31 +85,24 @@ private struct PlaybackSeekBar: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            GeometryReader { proxy in
-                let liveProgress = min(1, max(0, metrics.currentTime / max(metrics.duration, 1)))
-                let progress = isSeeking ? previewProgress : liveProgress
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
-                    Capsule().fill(Color.primary).frame(width: max(4, proxy.size.width * progress), height: 4)
-                    Circle().fill(Color(uiColor: .systemBackground)).frame(width: 22, height: 22)
-                        .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-                        .offset(x: max(0, min(proxy.size.width - 22, proxy.size.width * progress - 11)))
-                }
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { value in
+            Slider(
+                value: Binding(
+                    get: { isSeeking ? previewProgress : liveProgress },
+                    set: { previewProgress = $0 }
+                ),
+                in: 0...1,
+                onEditingChanged: { editing in
+                    if editing {
+                        previewProgress = liveProgress
                         isSeeking = true
-                        previewProgress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
-                    }
-                    .onEnded { value in
-                        let progress = max(0, min(1, value.location.x / max(proxy.size.width, 1)))
-                        playback.seek(to: progress * max(metrics.duration, 0))
+                    } else {
+                        playback.seek(to: previewProgress * max(metrics.duration, 0))
                         isSeeking = false
-                    })
-            }
+                    }
+                }
+            )
+            .tint(.primary)
             .frame(height: 30)
-            .accessibilityElement()
             .accessibilityLabel("Playback position")
             .accessibilityValue(timeString(metrics.currentTime))
             HStack {
@@ -119,6 +112,10 @@ private struct PlaybackSeekBar: View {
             }
             .font(.caption2).foregroundColor(.secondary)
         }
+    }
+
+    private var liveProgress: Double {
+        min(1, max(0, metrics.currentTime / max(metrics.duration, 1)))
     }
 
     private func timeString(_ time: TimeInterval) -> String {
@@ -412,6 +409,11 @@ struct ContentView: View {
             noteworthyView
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .onReceive(playback.$transitioningTrackID.compactMap { $0 }) { trackID in
+            if let track = libraryTracks.first(where: { $0.id == trackID }) {
+                transitionTo(track)
+            }
         }
         .onReceive(playback.$currentTrackID.compactMap { $0 }) { trackID in
             if let track = libraryTracks.first(where: { $0.id == trackID }) {

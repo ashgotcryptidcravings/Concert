@@ -334,6 +334,7 @@ final class ConcertPlayback: ObservableObject {
 
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTrackID: UUID?
+    @Published private(set) var transitioningTrackID: UUID?
     let metrics = ConcertPlaybackMetrics()
     let equalizerSettings = ConcertEqualizerSettings()
     var currentTime: TimeInterval {
@@ -648,6 +649,7 @@ final class ConcertPlayback: ObservableObject {
             decks[incomingDeckIndex].node.stop()
             decks[incomingDeckIndex].file = nil
             self.incomingDeckIndex = nil
+            transitioningTrackID = nil
             decks[activeDeckIndex].node.volume = 1
         }
         let target = min(max(0, time), max(0, duration - 0.01))
@@ -742,6 +744,7 @@ final class ConcertPlayback: ObservableObject {
         fadeTimer?.invalidate()
         for deck in decks { deck.node.stop() }
         incomingDeckIndex = nil
+        transitioningTrackID = nil
         let deckIndex = activeDeckIndex ?? 0
         guard schedule(track, on: deckIndex, from: 0) else { return }
         for index in decks.indices where index != deckIndex { decks[index].file = nil }
@@ -817,6 +820,7 @@ final class ConcertPlayback: ObservableObject {
         guard queue.indices.contains(index), let activeDeckIndex,
               queue[index].audioURL != nil else { return }
         fadeTimer?.invalidate()
+        transitioningTrackID = nil
         if let incomingDeckIndex {
             decks[incomingDeckIndex].node.stop()
             decks[incomingDeckIndex].file = nil
@@ -830,6 +834,7 @@ final class ConcertPlayback: ObservableObject {
         let fadeDuration = max(0.1, min(duration, outgoingRemaining, incomingDuration))
         decks[incomingDeckIndex].node.volume = 0
         self.incomingDeckIndex = incomingDeckIndex
+        transitioningTrackID = queue[index].id
         startAudioEngineIfNeeded()
         fadeElapsed = 0
         decks[incomingDeckIndex].node.play()
@@ -851,6 +856,7 @@ final class ConcertPlayback: ObservableObject {
                 self.decks[incomingDeckIndex].node.volume = 1
                 self.activeDeckIndex = incomingDeckIndex
                 self.incomingDeckIndex = nil
+                self.transitioningTrackID = nil
                 self.queueIndex = index
                 self.currentTrackID = self.queue[index].id
                 self.currentTime = self.decks[incomingDeckIndex].currentTime(in: self.audioEngine)
