@@ -10,8 +10,30 @@
         <attribute name="avatarSymbol" optional="YES" attributeType="String"/>
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
     </entity>
+    <entity name="FavoriteSong" representedClassName="FavoriteSong" syncable="YES" codeGenerationType="class">
+        <attribute name="trackKey" optional="YES" attributeType="String"/>
+        <attribute name="title" optional="YES" attributeType="String"/>
+        <attribute name="artist" optional="YES" attributeType="String"/>
+        <attribute name="album" optional="YES" attributeType="String"/>
+        <attribute name="quality" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
+    <entity name="AppSettings" representedClassName="AppSettings" syncable="YES" codeGenerationType="class">
+        <attribute name="recordKey" optional="YES" attributeType="String"/>
+        <attribute name="audioQuality" optional="YES" attributeType="String"/>
+        <attribute name="autoplayEnabled" optional="YES" attributeType="Boolean" usesScalarValueType="NO"/>
+        <attribute name="crossfadeDuration" optional="YES" attributeType="Double" usesScalarValueType="NO"/>
+        <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
+    <entity name="LibraryTrackRecord" representedClassName="LibraryTrackRecord" syncable="YES" codeGenerationType="class">
+        <attribute name="trackKey" optional="YES" attributeType="String"/>
+        <attribute name="firstSeenAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
     <elements>
         <element name="Item" positionX="-63" positionY="-18" width="128" height="44"/>
         <element name="AccountProfile" positionX="135" positionY="-18" width="128" height="134"/>
+        <element name="FavoriteSong" positionX="305" positionY="-18" width="128" height="134"/>
+        <element name="AppSettings" positionX="480" positionY="-18" width="128" height="119"/>
+        <element name="LibraryTrackRecord" positionX="650" positionY="-18" width="128" height="74"/>
     </elements>
 </model>

@@ -8,6 +8,7 @@ import UIKit
 
 struct Track: Identifiable {
     let id: UUID
+    let libraryKey: String
     let title: String
     let artist: String
     let album: String
@@ -39,6 +40,16 @@ struct Track: Identifiable {
         artworkData: Data? = nil
     ) {
         self.id = id
+        if let audioURL {
+            let components = audioURL.standardizedFileURL.pathComponents
+            if let songsIndex = components.lastIndex(of: "Songs") {
+                self.libraryKey = components.dropFirst(songsIndex + 1).joined(separator: "/").lowercased()
+            } else {
+                self.libraryKey = audioURL.standardizedFileURL.path.lowercased()
+            }
+        } else {
+            self.libraryKey = "\(quality.lowercased())|\(album.lowercased())|\(title.lowercased())"
+        }
         self.title = title
         self.artist = artist
         self.album = album
@@ -463,11 +474,9 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
         self.queue = shuffleEnabled ? shuffledQueue(queue, keeping: track) : queue
         queueIndex = self.queue.firstIndex(where: { $0.id == track.id }) ?? 0
 
-        if isPlaying, crossfadeDuration > 0, player != nil {
-            beginCrossfade(to: queueIndex, duration: crossfadeDuration)
-        } else {
-            start(track)
-        }
+        // Explicit track selection should take effect immediately. Crossfade is
+        // reserved for automatic transitions near the end of a song.
+        start(track)
     }
 
     func togglePlayback() {
@@ -519,21 +528,13 @@ final class ConcertPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func next() {
         guard let nextIndex = nextQueueIndex else { return }
-        if isPlaying, crossfadeDuration > 0 {
-            beginCrossfade(to: nextIndex, duration: crossfadeDuration)
-        } else {
-            start(queue[nextIndex])
-        }
+        start(queue[nextIndex])
     }
 
     func previous() {
         guard !queue.isEmpty else { return }
         let previousIndex = max(0, queueIndex - 1)
-        if isPlaying, crossfadeDuration > 0 {
-            beginCrossfade(to: previousIndex, duration: crossfadeDuration)
-        } else {
-            start(queue[previousIndex])
-        }
+        start(queue[previousIndex])
     }
 
     func toggleShuffle() {

@@ -6,6 +6,7 @@
 import SwiftUI
 import UIKit
 import AVKit
+import CoreData
 
 private enum ConcertTab: String, CaseIterable {
     case discover = "Discover"
@@ -56,11 +57,15 @@ private let loadingTrack = Track(
 )
 
 struct ContentView: View {
+    @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedTab: ConcertTab = .discover
     @State private var libraryTracks: [Track]
     @State private var currentTrack: Track
     @State private var favorites: Set<String> = []
+    @State private var noteworthyKeys: [String] = []
+    @State private var showingNoteworthy = false
+    @State private var settingsLoaded = false
     @State private var isLoadingLibrary = true
     @State private var showingPlayer = false
     @State private var playerDetent: PresentationDetent = .medium
@@ -111,25 +116,28 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Group {
-                switch selectedTab {
-                case .discover: discoverView
-                case .favorites: favoritesView
-                case .search: searchView
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            nowPlayingBar
-            tabBar
+        TabView(selection: $selectedTab) {
+            discoverView
+                .safeAreaInset(edge: .bottom, spacing: 0) { nowPlayingBar }
+                .tabItem { Label(ConcertTab.discover.rawValue, systemImage: ConcertTab.discover.symbol) }
+                .tag(ConcertTab.discover)
+            favoritesView
+                .safeAreaInset(edge: .bottom, spacing: 0) { nowPlayingBar }
+                .tabItem { Label(ConcertTab.favorites.rawValue, systemImage: ConcertTab.favorites.symbol) }
+                .tag(ConcertTab.favorites)
+            searchView
+                .safeAreaInset(edge: .bottom, spacing: 0) { nowPlayingBar }
+                .tabItem { Label(ConcertTab.search.rawValue, systemImage: ConcertTab.search.symbol) }
+                .tag(ConcertTab.search)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .tint(.accentColor)
         .task {
             guard libraryTracks.isEmpty else { return }
+            restorePersistedState()
             let loadedTracks = await SongLibrary.load()
             libraryTracks = loadedTracks
             playback.updateLibrary(loadedTracks)
+            noteworthyKeys = recordAndOrderNewTracks(loadedTracks)
             if let firstTrack = loadedTracks.first { currentTrack = firstTrack }
             isLoadingLibrary = false
         }
@@ -140,6 +148,11 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingSettings) {
             settingsView
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingNoteworthy) {
+            noteworthyView
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -154,14 +167,9 @@ struct ContentView: View {
         .onAppear {
             playerBackground = artworkColor(for: currentTrack)
         }
-        .alert("SharePlay", isPresented: Binding(
-            get: { playback.sharePlayError != nil },
-            set: { if !$0 { playback.sharePlayError = nil } }
-        )) {
-            Button("OK", role: .cancel) { playback.sharePlayError = nil }
-        } message: {
-            Text(playback.sharePlayError ?? "")
-        }
+        .onChange(of: audioQuality) { _ in persistSettings() }
+        .onChange(of: playback.crossfadeDuration) { _ in persistSettings() }
+        .onChange(of: playback.autoplayEnabled) { _ in persistSettings() }
     }
 
     private var discoverView: some View {
@@ -193,11 +201,11 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    sectionTitle("New and noteworthy", action: "See all")
+                    sectionTitle("New and noteworthy", action: "See all") { showingNoteworthy = true }
                     if isLoadingLibrary {
                         ForEach(0..<2, id: \.self) { _ in skeletonTrackRow }
                     } else {
-                        ForEach(tracks.suffix(2)) { track in trackRow(track) }
+                        ForEach(noteworthyTracks.prefix(2)) { track in trackRow(track) }
                     }
                 }
             }
@@ -235,7 +243,7 @@ struct ContentView: View {
                     }
                     Spacer()
                     Button {
-                        let favoriteTracks = tracks.filter { favorites.contains($0.title) }
+                        let favoriteTracks = tracks.filter { favorites.contains($0.libraryKey) }
                         if let track = favoriteTracks.first ?? tracks.first { play(track, queue: favoriteTracks.isEmpty ? tracks : favoriteTracks) }
                     } label: {
                         Image(systemName: "play.fill").font(.system(size: 15, weight: .bold)).foregroundColor(.white).frame(width: 44, height: 44).background(Color.accentColor, in: Circle())
@@ -247,7 +255,7 @@ struct ContentView: View {
                     if isLoadingLibrary {
                         ForEach(0..<4, id: \.self) { _ in skeletonTrackRow }
                     } else {
-                        ForEach(tracks.filter { favorites.contains($0.title) }) { track in
+                        ForEach(tracks.filter { favorites.contains($0.libraryKey) }) { track in
                             trackRow(track, showFavorite: true)
                         }
                     }
@@ -381,6 +389,93 @@ struct ContentView: View {
         }
     }
 
+    private var noteworthyTracks: [Track] {
+        let indexed = Dictionary(uniqueKeysWithValues: libraryTracks.map { ($0.libraryKey, $0) })
+        let ordered = noteworthyKeys.compactMap { indexed[$0] }
+        return ordered.isEmpty ? libraryTracks.shuffled() : ordered
+    }
+
+    private var noteworthyView: some View {
+        NavigationView {
+            List(noteworthyTracks) { track in
+                trackRow(track, queue: noteworthyTracks)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+            .navigationTitle("New and noteworthy")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showingNoteworthy = false }
+                }
+            }
+        }
+    }
+
+    private func restorePersistedState() {
+        let favoritesRequest = NSFetchRequest<NSManagedObject>(entityName: "FavoriteSong")
+        if let records = try? viewContext.fetch(favoritesRequest) {
+            favorites = Set(records.compactMap { $0.value(forKey: "trackKey") as? String })
+        }
+
+        let settingsRequest = NSFetchRequest<NSManagedObject>(entityName: "AppSettings")
+        settingsRequest.sortDescriptors = [NSSortDescriptor(key: "updatedAt", ascending: false)]
+        settingsRequest.fetchLimit = 1
+        if let settings = try? viewContext.fetch(settingsRequest).first {
+            audioQuality = settings.value(forKey: "audioQuality") as? String ?? "All qualities"
+            playback.crossfadeDuration = settings.value(forKey: "crossfadeDuration") as? Double ?? 0
+            playback.autoplayEnabled = settings.value(forKey: "autoplayEnabled") as? Bool ?? false
+        }
+        settingsLoaded = true
+    }
+
+    private func persistSettings() {
+        guard settingsLoaded else { return }
+        let request = NSFetchRequest<NSManagedObject>(entityName: "AppSettings")
+        request.predicate = NSPredicate(format: "recordKey == %@", "default")
+        request.fetchLimit = 1
+        let record = (try? viewContext.fetch(request).first) ?? NSEntityDescription.insertNewObject(forEntityName: "AppSettings", into: viewContext)
+        record.setValue("default", forKey: "recordKey")
+        record.setValue(audioQuality, forKey: "audioQuality")
+        record.setValue(playback.crossfadeDuration, forKey: "crossfadeDuration")
+        record.setValue(playback.autoplayEnabled, forKey: "autoplayEnabled")
+        record.setValue(Date(), forKey: "updatedAt")
+        saveContext()
+    }
+
+    private func recordAndOrderNewTracks(_ tracks: [Track]) -> [String] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: "LibraryTrackRecord")
+        let existingRecords = (try? viewContext.fetch(request)) ?? []
+        var firstSeen = [String: Date]()
+        for record in existingRecords {
+            if let key = record.value(forKey: "trackKey") as? String,
+               let date = record.value(forKey: "firstSeenAt") as? Date,
+               firstSeen[key] == nil {
+                firstSeen[key] = date
+            }
+        }
+        let now = Date()
+        for track in tracks where firstSeen[track.libraryKey] == nil {
+            let record = NSEntityDescription.insertNewObject(forEntityName: "LibraryTrackRecord", into: viewContext)
+            record.setValue(track.libraryKey, forKey: "trackKey")
+            record.setValue(now, forKey: "firstSeenAt")
+            firstSeen[track.libraryKey] = now
+        }
+        saveContext()
+
+        let grouped = Dictionary(grouping: tracks, by: { Calendar.current.startOfDay(for: firstSeen[$0.libraryKey] ?? now) })
+        return grouped.keys.sorted(by: >).flatMap { day in
+            (grouped[day] ?? []).shuffled().map(\.libraryKey)
+        }
+    }
+
+    private func saveContext() {
+        guard viewContext.hasChanges else { return }
+        do { try viewContext.save() }
+        catch { NSLog("Concert Core Data save failed: %@", error.localizedDescription) }
+    }
+
     private var nowPlayingBar: some View {
         HStack(spacing: 12) {
             if isLoadingLibrary {
@@ -406,22 +501,20 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open now playing")
                 Spacer(minLength: 4)
-                Button { playback.startSharePlay() } label: {
-                    Image(systemName: "shareplay").font(.system(size: 18)).foregroundColor(playback.sharePlayActive ? .accentColor : .secondary).frame(width: 40, height: 44)
+                Spacer(minLength: 4)
+                HStack(spacing: 8) {
+                    AirPlayRouteButton().frame(width: 38, height: 40)
+                    Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill").font(.system(size: 19, weight: .semibold)).foregroundColor(.primary).frame(width: 38, height: 40)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                    Button { playback.next() } label: {
+                        Image(systemName: "forward.end.fill").font(.system(size: 17)).foregroundColor(.primary).frame(width: 38, height: 40)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Next track")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Start SharePlay")
-                AirPlayRouteButton().frame(width: 44, height: 44).padding(.trailing, 2)
-                Button { playback.togglePlayback(currentTrack: currentTrack, queue: tracks) } label: {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill").font(.system(size: 19, weight: .semibold)).foregroundColor(.primary).frame(width: 36, height: 40)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isPlaying ? "Pause" : "Play")
-                Button { playback.next() } label: {
-                    Image(systemName: "forward.end.fill").font(.system(size: 17)).foregroundColor(.primary).frame(width: 30, height: 40)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Next track")
                 }
         }
         .padding(.horizontal, 10)
@@ -440,26 +533,6 @@ struct ContentView: View {
         .padding(.bottom, 4)
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 0) {
-            ForEach(ConcertTab.allCases, id: \.self) { tab in
-                Button { selectedTab = tab } label: {
-                    VStack(spacing: 5) {
-                        Image(systemName: tab.symbol).font(.system(size: 20, weight: selectedTab == tab ? .semibold : .regular))
-                        Text(tab.rawValue).font(.system(size: 10, weight: selectedTab == tab ? .semibold : .medium))
-                    }
-                    .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.top, 8)
-        .padding(.bottom, 3)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-    }
-
     private var fullPlayer: some View {
         GeometryReader { geometry in
             let compactLayout = geometry.size.height < 500
@@ -476,8 +549,8 @@ struct ContentView: View {
                         }
                         Spacer()
                         Button { toggleFavorite(currentTrack) } label: {
-                            Image(systemName: favorites.contains(currentTrack.title) ? "heart.fill" : "heart")
-                                .font(.system(size: 23)).foregroundColor(favorites.contains(currentTrack.title) ? .pink : .secondary)
+                            Image(systemName: favorites.contains(currentTrack.libraryKey) ? "heart.fill" : "heart")
+                                .font(.system(size: 23)).foregroundColor(favorites.contains(currentTrack.libraryKey) ? .pink : .secondary)
                         }.buttonStyle(.plain)
                     }
                     VStack(spacing: 4) {
@@ -806,7 +879,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             if showFavorite {
                 Button { toggleFavorite(track) } label: {
-                    Image(systemName: favorites.contains(track.title) ? "heart.fill" : "heart").foregroundColor(.pink).frame(width: 32, height: 40)
+                    Image(systemName: favorites.contains(track.libraryKey) ? "heart.fill" : "heart").foregroundColor(.pink).frame(width: 32, height: 40)
                 }.buttonStyle(.plain)
             }
             Text(track.duration).font(.caption).foregroundColor(.secondary)
@@ -885,14 +958,29 @@ struct ContentView: View {
     }
 
     private func toggleFavorite(_ track: Track) {
-        if favorites.contains(track.title) { favorites.remove(track.title) }
-        else { favorites.insert(track.title) }
+        let request = NSFetchRequest<NSManagedObject>(entityName: "FavoriteSong")
+        request.predicate = NSPredicate(format: "trackKey == %@", track.libraryKey)
+        request.fetchLimit = 1
+        if let existing = (try? viewContext.fetch(request))?.first {
+            viewContext.delete(existing)
+            favorites.remove(track.libraryKey)
+        } else {
+            let record = NSEntityDescription.insertNewObject(forEntityName: "FavoriteSong", into: viewContext)
+            record.setValue(track.libraryKey, forKey: "trackKey")
+            record.setValue(track.title, forKey: "title")
+            record.setValue(track.artist, forKey: "artist")
+            record.setValue(track.album, forKey: "album")
+            record.setValue(track.quality, forKey: "quality")
+            record.setValue(Date(), forKey: "createdAt")
+            favorites.insert(track.libraryKey)
+        }
+        saveContext()
     }
 
 }
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView()
+        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
     }
 }
