@@ -31,7 +31,14 @@ available. Otherwise, track names come from filenames, album names from the
 album folder, and artist is shown as "Unknown Artist". A `cover.jpg` or
 `cover.png` in the album or disc folder is used as artwork when available.
 
-Add folders inside this Xcode `Songs` folder reference and rebuild the app so
-they are included in the simulator or app bundle. Audio formats scanned:
+Add folders inside this `Songs` folder on the Mac. Concert reads the library
+from the Mac music server and downloads a track to the iPhone the first time it
+is played. The audio files are kept out of the iPhone app bundle. Audio formats scanned:
 M4A, MP3, AAC, WAV, AIFF, CAF, ALAC, and FLAC. Playback support depends on the
 iOS audio decoder.
+
+To start the server, open `MacLibraryServer/Start Concert Music Server.command`
+from this repository on the Mac. The first launch prepares a small Python
+environment. Keep its Terminal window open while listening. It prints the
+Mac’s local address; paste that address into Concert’s Settings and tap
+Connect. Both devices must be on the same Wi-Fi network.

@@ -306,7 +306,7 @@ private let loadingTrack = Track(
     quality: ""
 )
 
-private enum ArtworkImageCache {
+enum ArtworkImageCache {
     private static let cache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.totalCostLimit = 32 * 1024 * 1024
@@ -314,11 +314,11 @@ private enum ArtworkImageCache {
     }()
 
     static func image(for track: Track) -> UIImage? {
-        let key = (track.artworkURL?.path ?? "embedded-\(track.id.uuidString)") as NSString
+        let key = cacheKey(for: track) as NSString
         if let cached = cache.object(forKey: key) { return cached }
 
         let image: UIImage?
-        if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
+        if let artworkURL = track.artworkURL, artworkURL.isFileURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
             image = fileImage
         } else if let artworkData = track.artworkData {
             image = UIImage(data: artworkData)
@@ -330,6 +330,44 @@ private enum ArtworkImageCache {
             cache.setObject(image, forKey: key, cost: cost)
         }
         return image
+    }
+
+    static func preloadRemoteImages(for tracks: [Track]) async {
+        let urls = Array(Set(tracks.compactMap { track -> URL? in
+            guard let url = track.artworkURL, !url.isFileURL else { return nil }
+            return url
+        }))
+        await withTaskGroup(of: (URL, UIImage?).self) { group in
+            var nextIndex = 0
+            let initialCount = min(4, urls.count)
+            for _ in 0..<initialCount {
+                let url = urls[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    guard let (data, _) = try? await URLSession.shared.data(from: url) else { return (url, nil) }
+                    return (url, UIImage(data: data))
+                }
+            }
+            while let (url, image) = await group.next() {
+                if let image {
+                    let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
+                    cache.setObject(image, forKey: url.absoluteString as NSString, cost: cost)
+                }
+                if nextIndex < urls.count {
+                    let nextURL = urls[nextIndex]
+                    nextIndex += 1
+                    group.addTask {
+                        guard let (data, _) = try? await URLSession.shared.data(from: nextURL) else { return (nextURL, nil) }
+                        return (nextURL, UIImage(data: data))
+                    }
+                }
+            }
+        }
+    }
+
+    private static func cacheKey(for track: Track) -> String {
+        guard let url = track.artworkURL else { return "embedded-\(track.id.uuidString)" }
+        return url.isFileURL ? url.path : url.absoluteString
     }
 }
 
@@ -353,6 +391,8 @@ struct ContentView: View {
     @State private var albumSheet: AlbumSheet?
     @State private var searchText = ""
     @State private var audioQuality = "All qualities"
+    @AppStorage("concert.macLibraryServerURL") private var macLibraryServerAddress = ""
+    @State private var libraryServerStatus = ""
     @State private var playerBackground = Color(uiColor: .systemGroupedBackground)
     @StateObject private var playback = ConcertPlayback()
 
@@ -414,11 +454,16 @@ struct ContentView: View {
         .task {
             guard libraryTracks.isEmpty else { return }
             restorePersistedState()
-            let loadedTracks = await SongLibrary.load()
+            let serverURL = serverURL(from: macLibraryServerAddress)
+            let loadedTracks = await SongLibrary.load(serverURL: serverURL)
+            await ArtworkImageCache.preloadRemoteImages(for: loadedTracks)
             libraryTracks = loadedTracks
             playback.updateLibrary(loadedTracks)
             noteworthyKeys = recordAndOrderNewTracks(loadedTracks)
             if let firstTrack = loadedTracks.first { transitionTo(firstTrack) }
+            if serverURL != nil {
+                libraryServerStatus = loadedTracks.isEmpty ? "Could not reach the Mac music server." : "Connected · \(loadedTracks.count) songs"
+            }
             isLoadingLibrary = false
         }
         .sheet(isPresented: $showingPlayer) {
@@ -637,6 +682,50 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
+                    Text("MAC MUSIC SERVER")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .tracking(1.2)
+                        .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Stream your Mac library", systemImage: "desktopcomputer")
+                            .font(.system(size: 15, weight: .medium))
+                        TextField("http://192.168.1.20:8765", text: $macLibraryServerAddress)
+                            .font(.system(size: 14, design: .monospaced))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 12) {
+                            Button(action: connectToMacLibrary) {
+                                Label(isLoadingLibrary ? "Connecting…" : "Connect", systemImage: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .disabled(isLoadingLibrary)
+                            if !macLibraryServerAddress.isEmpty {
+                                Button("Disconnect") {
+                                    macLibraryServerAddress = ""
+                                    libraryTracks = []
+                                    noteworthyKeys = []
+                                    libraryServerStatus = "Disconnected from the Mac music server."
+                                }
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.secondary)
+                            }
+                        }
+                        Text(libraryServerStatus.isEmpty
+                             ? "Start Concert’s music server on your Mac, then enter its Wi-Fi address here."
+                             : libraryServerStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("Keep the Mac server running and both devices on the same Wi-Fi network.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(16)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
                     Text("PLAYBACK").font(.system(size: 11, weight: .bold, design: .rounded)).tracking(1.2).foregroundColor(.secondary)
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Audio quality", systemImage: "waveform")
@@ -698,6 +787,37 @@ struct ContentView: View {
                     Button("Done") { showingNoteworthy = false }
                 }
             }
+        }
+    }
+
+    private func serverURL(from address: String) -> URL? {
+        let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let normalized = value.contains("://") ? value : "http://\(value)"
+        guard let components = URLComponents(string: normalized),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil else { return nil }
+        return components.url
+    }
+
+    private func connectToMacLibrary() {
+        guard let serverURL = serverURL(from: macLibraryServerAddress) else {
+            libraryServerStatus = "Enter the Mac server address, including its port."
+            return
+        }
+        isLoadingLibrary = true
+        libraryServerStatus = "Connecting to the Mac…"
+        Task {
+            let loadedTracks = await SongLibrary.load(serverURL: serverURL)
+            await ArtworkImageCache.preloadRemoteImages(for: loadedTracks)
+            libraryTracks = loadedTracks
+            playback.updateLibrary(loadedTracks)
+            noteworthyKeys = recordAndOrderNewTracks(loadedTracks)
+            if let firstTrack = loadedTracks.first { transitionTo(firstTrack) }
+            libraryServerStatus = loadedTracks.isEmpty
+                ? "Could not reach the Mac server or it has no readable songs."
+                : "Connected · \(loadedTracks.count) songs"
+            isLoadingLibrary = false
         }
     }
 
@@ -794,7 +914,10 @@ struct ContentView: View {
                         transitioningArtwork(currentTrack, size: 44)
                         VStack(alignment: .leading, spacing: 3) {
                             transitioningTrackLabel(currentTrack.title, previous: previousArtworkTrack?.title, font: .system(size: 14, weight: .semibold), color: .primary)
-                            transitioningTrackLabel(currentTrack.artist, previous: previousArtworkTrack?.artist, font: .system(size: 12), color: .secondary)
+                            Text(playback.isBuffering ? "Loading from Mac…" : currentTrack.artist)
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
                     }
                     .foregroundColor(.primary)
@@ -843,7 +966,10 @@ struct ContentView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             transitioningTrackLabel(currentTrack.title, previous: previousArtworkTrack?.title, font: .system(size: 23, weight: .bold, design: .rounded), color: .primary)
-                            transitioningTrackLabel(currentTrack.artist, previous: previousArtworkTrack?.artist, font: .system(size: 16), color: .secondary)
+                            Text(playback.isBuffering ? "Loading from Mac…" : currentTrack.artist)
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
                         Spacer()
                         Button { toggleFavorite(currentTrack) } label: {

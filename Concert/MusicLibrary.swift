@@ -25,6 +25,7 @@ struct Track: Identifiable {
 
     init(
         id: UUID = UUID(),
+        libraryKey: String? = nil,
         title: String,
         artist: String,
         album: String,
@@ -40,7 +41,9 @@ struct Track: Identifiable {
         artworkData: Data? = nil
     ) {
         self.id = id
-        if let audioURL {
+        if let libraryKey {
+            self.libraryKey = libraryKey
+        } else if let audioURL {
             let components = audioURL.standardizedFileURL.pathComponents
             if let songsIndex = components.lastIndex(of: "Songs") {
                 self.libraryKey = components.dropFirst(songsIndex + 1).joined(separator: "/").lowercased()
@@ -106,7 +109,61 @@ enum SongLibrary {
     private static let audioExtensions: Set<String> = ["m4a", "mp3", "aac", "wav", "aiff", "aif", "caf", "alac", "flac"]
     private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "tiff"]
 
-    static func load() async -> [Track] {
+    private struct RemoteTrack: Decodable {
+        let libraryKey: String
+        let title: String
+        let artist: String
+        let album: String
+        let duration: String
+        let quality: String
+        let albumID: String
+        let discNumber: Int
+        let trackNumber: Int
+        let audioURL: URL
+        let artworkURL: URL?
+    }
+
+    static func load(serverURL: URL? = nil) async -> [Track] {
+        if let serverURL {
+            return await loadFromServer(serverURL)
+        }
+        return await loadBundled()
+    }
+
+    private static func loadFromServer(_ serverURL: URL) async -> [Track] {
+        let endpoint = serverURL.appendingPathComponent("api/library")
+        guard let (data, response) = try? await URLSession.shared.data(from: endpoint),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let remoteTracks = try? JSONDecoder().decode([RemoteTrack].self, from: data) else {
+            return []
+        }
+
+        return remoteTracks.map { remote in
+            Track(
+                libraryKey: remote.libraryKey,
+                title: remote.title,
+                artist: remote.artist,
+                album: remote.album,
+                duration: remote.duration,
+                artwork: "music.note",
+                tint: qualityColor(remote.quality),
+                quality: remote.quality.uppercased(),
+                albumID: remote.albumID,
+                discNumber: remote.discNumber,
+                trackNumber: remote.trackNumber,
+                audioURL: remote.audioURL,
+                artworkURL: remote.artworkURL
+            )
+        }.sorted {
+            if $0.albumID != $1.albumID { return $0.album.localizedStandardCompare($1.album) == .orderedAscending }
+            if $0.discNumber != $1.discNumber { return $0.discNumber < $1.discNumber }
+            if $0.trackNumber != $1.trackNumber { return $0.trackNumber < $1.trackNumber }
+            if qualityRank($0.quality) != qualityRank($1.quality) { return qualityRank($0.quality) > qualityRank($1.quality) }
+            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    private static func loadBundled() async -> [Track] {
         guard let songsURL = Bundle.main.resourceURL?.appendingPathComponent("Songs", isDirectory: true),
               let qualities = try? FileManager.default.contentsOfDirectory(at: songsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
             return []
@@ -329,10 +386,57 @@ private struct ConcertAudioDeck {
     }
 }
 
+private enum ConcertAudioFileCache {
+    static func fileURL(for remoteURL: URL) -> URL {
+        let components = URLComponents(url: remoteURL, resolvingAgainstBaseURL: false)
+        let version = components?.queryItems?.first(where: { $0.name == "v" })?.value ?? "1"
+        let fileExtension = remoteURL.pathExtension.isEmpty ? "audio" : remoteURL.pathExtension
+        let stem = remoteURL.deletingPathExtension().lastPathComponent
+        let safeName = "\(stem)-\(version)".map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ConcertRemoteSongs", isDirectory: true)
+        return directory.appendingPathComponent(String(safeName)).appendingPathExtension(fileExtension)
+    }
+
+    static func cachedFile(for remoteURL: URL) -> URL? {
+        let file = fileURL(for: remoteURL)
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
+}
+
+private actor ConcertRemoteAudioCache {
+    static let shared = ConcertRemoteAudioCache()
+    private var inFlight: [String: Task<URL, Error>] = [:]
+
+    func localFile(for remoteURL: URL) async throws -> URL {
+        let destination = ConcertAudioFileCache.fileURL(for: remoteURL)
+        if FileManager.default.fileExists(atPath: destination.path) { return destination }
+        if let task = inFlight[destination.path] { return try await task.value }
+
+        let task = Task<URL, Error> {
+            let (temporaryURL, response) = try await URLSession.shared.download(from: remoteURL)
+            guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+                throw URLError(.badServerResponse)
+            }
+            let directory = destination.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            return destination
+        }
+        inFlight[destination.path] = task
+        defer { inFlight[destination.path] = nil }
+        return try await task.value
+    }
+}
+
 final class ConcertPlayback: ObservableObject {
     static let equalizerFrequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
 
     @Published private(set) var isPlaying = false
+    @Published private(set) var isBuffering = false
     @Published private(set) var currentTrackID: UUID?
     @Published private(set) var transitioningTrackID: UUID?
     let metrics = ConcertPlaybackMetrics()
@@ -375,6 +479,9 @@ final class ConcertPlayback: ObservableObject {
     private var fadeTimer: Timer?
     private var fadeElapsed: Double = 0
     private var liveActivity: Activity<ConcertNowPlayingAttributes>?
+    private var pendingPlaybackToken = UUID()
+    private var pendingTrackID: UUID?
+    private var prefetchedTrackID: UUID?
 
     enum RepeatMode {
         case off, all, one
@@ -737,7 +844,55 @@ final class ConcertPlayback: ObservableObject {
     }
 
     private func start(_ track: Track) {
-        guard track.audioURL != nil else { return }
+        start(track, crossfadeIfPossible: false, transitionDuration: 0.22)
+    }
+
+    private func start(_ track: Track, crossfadeIfPossible: Bool, transitionDuration: Double) {
+        guard let audioURL = track.audioURL else { return }
+        let token = UUID()
+        pendingPlaybackToken = token
+        pendingTrackID = track.id
+
+        if audioURL.isFileURL {
+            isBuffering = false
+            pendingTrackID = nil
+            startPrepared(track, from: audioURL, crossfadeIfPossible: crossfadeIfPossible, transitionDuration: transitionDuration)
+            return
+        }
+        if let cachedURL = ConcertAudioFileCache.cachedFile(for: audioURL) {
+            isBuffering = false
+            pendingTrackID = nil
+            startPrepared(track, from: cachedURL, crossfadeIfPossible: crossfadeIfPossible, transitionDuration: transitionDuration)
+            return
+        }
+
+        isBuffering = true
+        Task { [weak self] in
+            do {
+                let localURL = try await ConcertRemoteAudioCache.shared.localFile(for: audioURL)
+                await MainActor.run { [weak self] in
+                    guard let self, self.pendingPlaybackToken == token else { return }
+                    self.isBuffering = false
+                    self.pendingTrackID = nil
+                    self.startPrepared(track, from: localURL, crossfadeIfPossible: crossfadeIfPossible, transitionDuration: transitionDuration)
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self, self.pendingPlaybackToken == token else { return }
+                    self.isBuffering = false
+                    self.pendingTrackID = nil
+                    self.sharePlayError = "Could not load \(track.title) from the Mac music server. Check that the Mac is awake and both devices are on the same Wi-Fi network."
+                }
+            }
+        }
+    }
+
+    private func startPrepared(_ track: Track, from audioURL: URL, crossfadeIfPossible: Bool, transitionDuration: Double) {
+        if crossfadeIfPossible, isPlaying, activeDeckIndex != nil {
+            beginCrossfade(to: queueIndex, duration: transitionDuration)
+            return
+        }
+
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
         try? audioSession.setActive(true)
@@ -747,7 +902,7 @@ final class ConcertPlayback: ObservableObject {
         incomingDeckIndex = nil
         transitioningTrackID = nil
         let deckIndex = activeDeckIndex ?? 0
-        guard schedule(track, on: deckIndex, from: 0) else { return }
+        guard schedule(track, on: deckIndex, from: 0, using: audioURL) else { return }
         for index in decks.indices where index != deckIndex { decks[index].file = nil }
         activeDeckIndex = deckIndex
         decks[deckIndex].node.volume = 1
@@ -763,10 +918,19 @@ final class ConcertPlayback: ObservableObject {
         updateNowPlayingInfo()
         publishSharePlayState()
         startProgressTimer()
+        prefetchUpcomingTrackIfNeeded()
     }
 
-    private func schedule(_ track: Track, on deckIndex: Int, from time: TimeInterval) -> Bool {
-        guard decks.indices.contains(deckIndex), let url = track.audioURL,
+    private func schedule(_ track: Track, on deckIndex: Int, from time: TimeInterval, using localURL: URL? = nil) -> Bool {
+        let resolvedURL: URL?
+        if let localURL {
+            resolvedURL = localURL
+        } else if let audioURL = track.audioURL {
+            resolvedURL = audioURL.isFileURL ? audioURL : ConcertAudioFileCache.cachedFile(for: audioURL)
+        } else {
+            resolvedURL = nil
+        }
+        guard decks.indices.contains(deckIndex), let url = resolvedURL, url.isFileURL,
               let file = try? AVAudioFile(forReading: url) else { return false }
         let sampleRate = file.processingFormat.sampleRate
         let startFrame = AVAudioFramePosition(min(Double(file.length), max(0, time * sampleRate)))
@@ -819,7 +983,17 @@ final class ConcertPlayback: ObservableObject {
 
     private func beginCrossfade(to index: Int, duration: Double) {
         guard queue.indices.contains(index), let activeDeckIndex,
-              queue[index].audioURL != nil else { return }
+              let audioURL = queue[index].audioURL else { return }
+        let incomingURL: URL
+        if audioURL.isFileURL {
+            incomingURL = audioURL
+        } else if let cachedURL = ConcertAudioFileCache.cachedFile(for: audioURL) {
+            incomingURL = cachedURL
+        } else {
+            guard pendingTrackID != queue[index].id else { return }
+            start(queue[index], crossfadeIfPossible: true, transitionDuration: duration)
+            return
+        }
         fadeTimer?.invalidate()
         transitioningTrackID = nil
         if let incomingDeckIndex {
@@ -829,7 +1003,7 @@ final class ConcertPlayback: ObservableObject {
             decks[activeDeckIndex].node.volume = 1
         }
         let incomingDeckIndex = 1 - activeDeckIndex
-        guard schedule(queue[index], on: incomingDeckIndex, from: 0) else { return }
+        guard schedule(queue[index], on: incomingDeckIndex, from: 0, using: incomingURL) else { return }
         let incomingDuration = decks[incomingDeckIndex].duration
         let outgoingRemaining = max(0.1, self.duration - currentTime)
         let fadeDuration = max(0.1, min(duration, outgoingRemaining, incomingDuration))
@@ -866,7 +1040,20 @@ final class ConcertPlayback: ObservableObject {
                 self.updateNowPlayingInfo()
                 self.publishSharePlayState()
                 self.startProgressTimer()
+                self.prefetchUpcomingTrackIfNeeded()
             }
+        }
+    }
+
+    private func prefetchUpcomingTrackIfNeeded() {
+        guard crossfadeDuration > 0 || autoplayEnabled,
+              let nextIndex = nextQueueIndex, queue.indices.contains(nextIndex),
+              let audioURL = queue[nextIndex].audioURL,
+              !audioURL.isFileURL, ConcertAudioFileCache.cachedFile(for: audioURL) == nil,
+              prefetchedTrackID != queue[nextIndex].id else { return }
+        prefetchedTrackID = queue[nextIndex].id
+        Task {
+            _ = try? await ConcertRemoteAudioCache.shared.localFile(for: audioURL)
         }
     }
 
@@ -880,14 +1067,7 @@ final class ConcertPlayback: ObservableObject {
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
-        let image: UIImage?
-        if let artworkURL = track.artworkURL, let fileImage = UIImage(contentsOfFile: artworkURL.path) {
-            image = fileImage
-        } else if let artworkData = track.artworkData, let embeddedImage = UIImage(data: artworkData) {
-            image = embeddedImage
-        } else {
-            image = nil
-        }
+        let image = ArtworkImageCache.image(for: track)
         if let image {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
         }
